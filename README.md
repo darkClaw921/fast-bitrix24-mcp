@@ -1,10 +1,11 @@
 ![PyPI - Format](https://img.shields.io/pypi/format/fast-bitrix24-mcp)
 ![PyPI - Status](https://img.shields.io/pypi/status/fast-bitrix24-mcp)
+![PyPI - Downloads](https://img.shields.io/pypi/dm/fast-bitrix24-mcp)
 
 # MCP сервер для взаимодействия с Bitrix24 rest api на основе fast-bitrix24
 Сервер находится в стадии разработки и тестирования. Рекомендуется использовать только в локальной частной сети.
 
-На данный момент сервер поддерживает следующие сущности:
+На данный момент сервер поддерживает следsующие сущности:
 - сделки
 - пользовательские поля 
 
