@@ -4,6 +4,10 @@ from .promts.promts import mcp as promts_mcp
 from .resources.userfields import mcp as userfields_mcp_resource
 from .tools.deal import mcp as deal_mcp
 from .tools.userfields import mcp as userfields_mcp
+from .tools.user import mcp as user_mcp
+from .tools.company import mcp as company_mcp
+from .tools.contact import mcp as contact_mcp
+from .tools.helper import mcp as helper_mcp
 from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
 from datetime import datetime
 today=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -29,7 +33,10 @@ mcp.mount("userfields", userfields_mcp_resource, True)
 mcp.mount("promts", promts_mcp, True)
 mcp.mount("deal", deal_mcp, True)
 mcp.mount('fields', userfields_mcp, True)
-
+mcp.mount("user", user_mcp, True)
+mcp.mount("company", company_mcp, True)
+mcp.mount("contact", contact_mcp, True)
+mcp.mount("helper", helper_mcp, True)
 
 @mcp.prompt(description="главный промт для взаимодействия с сервером который нужно использовать каждый раз при взаимодействии с сервером")
 def main_prompt() -> str:
@@ -60,4 +67,4 @@ def main_prompt() -> str:
 
 if __name__ == "__main__":
     # mcp.run(transport="stdio")
-   mcp.run(transport="sse", host="0.0.0.0", port=8000, timeout=600)
+   mcp.run(transport="sse", host="0.0.0.0", port=8000, timeout=10)

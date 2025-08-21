@@ -1,11 +1,11 @@
 import asyncio
 import os
 import traceback
-from fast_bitrix24 import Bitrix
-from orm_bitrix24.entity import Portal
 from pprint import pprint
 from dotenv import load_dotenv
 import json
+# from bitrixWork import get_fields_by_deal
+from .bitrixWork import get_fields_by_deal, get_fields_by_user, get_fields_by_contact
 load_dotenv()
 # Инициализация клиента Bitrix24
 webhook = os.getenv("WEBHOOK")
@@ -25,22 +25,23 @@ mcp = FastMCP("userfields")
 @mcp.tool()
 async def get_all_info_fields(entity:list[str]=['all'], isText:bool=True) -> str:
     """
-    Получение всех ID и названий полей сделки, контакта, компании
+    Получение всех ID, названий и значений полей сделки, контакта, компании
     args:
-        bitrix: Bitrix - клиент Bitrix24
         entity: list[str] - ['deal', 'contact', 'company'] or ['all']
+        isText: bool - True - возвращает текст, False - возвращает словарь
     return:
-        allText: str - все ID и названия полей сделки, контакта, компании и также id значений полей типа enumeration
+        allText: str - все ID, названий и значения полей сделки, контакта, компании и также id,value значений полей типа enumeration
     """
     
-    bitrix = Bitrix(webhook)
+    # bitrix = Bitrix(webhook)
     # Инициализация Portal
-    portal = Portal(bitrix)
+    # portal = Portal(bitrix)
 
     all_fields = {
         'deal': [],
         'contact': [],
-        'company': []
+        'company': [],
+        'user': []
     }
 
     if entity == ['all']:
@@ -48,23 +49,27 @@ async def get_all_info_fields(entity:list[str]=['all'], isText:bool=True) -> str
 
     for item in entity:
         if item == 'deal':
-            fields = await portal.deal.fields.get_all()
+            fields = await get_fields_by_deal()
         elif item == 'contact':
-            fields = await portal.contact.fields.get_all()
+            fields = await get_fields_by_contact()
+            
         elif item == 'company':
-            fields = await portal.company.fields.get_all()
+            pass
+            # fields = await portal.company.fields.get_all()
+        elif item == 'user':
+            fields = await get_fields_by_user()
 
         for field in fields:
-            if field.type == 'enumeration':
-                text=f'{field.name} ({field.type})'
-                for value in field.values:
-                    text+=f':\n  {value.value} (ID: {value.id})' if value.id else f'\n  {value.value}'
+            if field["type"] == 'enumeration':
+                text=f'{field["NAME"]} ({field["type"]})'
+                for value in field["items"]:
+                    text+=f':\n  {value["VALUE"]} (ID: {value["ID"]})' if value["ID"] else f'\n  {value["VALUE"]}'
                 all_fields[item].append({
-                    field.title:text
+                    field["formLabel"]:text
                 })
             else:
                 all_fields[item].append({
-                    field.title:f'{field.name} ({field.type})'
+                    field["title"]:f'{field["NAME"]} ({field["type"]})'
                 })
 
 
@@ -91,5 +96,5 @@ async def get_all_info_fields(entity:list[str]=['all'], isText:bool=True) -> str
 
 
 
-# if __name__ == "__main__":
-    # asyncio.run(get_all_info_fields(bitrix, ['deal', 'company']))
+if __name__ == "__main__":
+    pprint(asyncio.run(get_all_info_fields(entity=['deal'], isText=False)))
