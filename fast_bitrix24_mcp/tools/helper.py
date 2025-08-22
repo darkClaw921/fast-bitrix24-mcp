@@ -1,6 +1,9 @@
+from mcp.server.fastmcp.server import FastMCP
+import pytz
+
 from mcp.server.fastmcp import FastMCP, Context
 from typing import List, Dict, Any, Optional, Union
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 import json
 from dotenv import load_dotenv
@@ -69,31 +72,51 @@ def prepare_fields_to_humman_format(fields: dict, all_info_fields: dict) -> dict
 @mcp.tool()
 async def export_entities_to_json(entity: str, filter_fields: Dict[str, Any] = {}, select_fields: List[str] = ["*"], filename: Optional[str] = None) -> Dict[str, Any]:
     """Экспорт элементов сущности в JSON
-    - entity: 'deal' | 'contact' | 'company' | 'user'
+    - entity: 'deal' | 'contact' | 'company' | 'user' | 'task'
     - filter_fields: фильтр Bitrix24 (например {"CLOSED": "N", ">=DATE_CREATE": "2025-06-01"})
     - select_fields: список полей; ['*', 'UF_*'] означает все поля
     - filename: имя файла (опционально). Если не указано, сформируется автоматически в папке exports
     Возвращает: {"entity": str, "count": int, "file": str}
     """
+    # Импортируем функции для работы с задачами
+    from .bitrixWork import get_tasks_by_filter
 
     method_map = {
         "deal": "crm.deal.list",
         "contact": "crm.contact.list",
         "company": "crm.company.list",
-        "user": "user.get"
+        "user": "user.get",
+        "task": None  # Используем кастомную функцию
     }
     entity = entity.lower()
     if entity not in method_map:
         return {"error": f"unsupported entity: {entity}", "count": 0}
 
-    params: Dict[str, Any] = {"filter": filter_fields}
-    if select_fields and select_fields != ["*"]:
-        params["select"] = select_fields
-
     try:
-        items: List[Dict[str, Any]] = await bit.get_all(method_map[entity], params=params)
+        if entity == "task":
+            # Используем кастомную функцию для задач
+            order = {"ID": "DESC"}  # По умолчанию
+            if 'order' in filter_fields:
+                order = filter_fields.pop('order')
+            items = await get_tasks_by_filter(filter_fields, select_fields, order)
+        else:
+            # Стандартные сущности CRM
+            params: Dict[str, Any] = {"filter": filter_fields}
+            if select_fields and select_fields != ["*"]:
+                params["select"] = select_fields
+            items = await bit.get_all(method_map[entity], params=params)
     except Exception as exc:
         return {"error": str(exc), "count": 0}
+
+    # Обработка результата
+    if isinstance(items, dict):
+        if items.get('order0000000000'):
+            items = items['order0000000000']
+        elif 'tasks' in items:
+            items = items['tasks']
+    
+    if not isinstance(items, list):
+        items = []
 
     exports_dir = Path("exports")
     exports_dir.mkdir(parents=True, exist_ok=True)
@@ -208,7 +231,7 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
-def _keyword_to_datetime(keyword: str, tz: Optional[timezone]) -> Optional[datetime]:
+def _keyword_to_datetime(keyword: str, tz: Optional[tzinfo]) -> Optional[datetime]:
     """Преобразует ключевые слова 'today', 'tomorrow', 'yesterday' в начало соответствующего дня."""
     if not isinstance(keyword, str):
         return None
@@ -368,3 +391,56 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
 
     output["total_records"] = len(filtered)
     return output
+
+@mcp.tool()
+async def datetime_now() -> str :
+    """Получить Текущую дата и время"""
+    timezone = pytz.timezone("Europe/Moscow")
+
+    return datetime.now(timezone).isoformat()
+
+
+@mcp.tool()
+async def analyze_tasks_export(file_path: str, operation: str, fields: Optional[Union[str, List[str]]] = None, condition: Optional[Union[str, Dict[str, Any]]] = None, group_by: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Анализ экспортированных задач из файла JSON
+    - file_path: путь к файлу JSON с экспортом задач
+    - operation: операция анализа ('count', 'sum', 'avg', 'min', 'max')
+    - fields: список полей для анализа (например ['TIME_ESTIMATE', 'DURATION_FACT'])
+    - condition: условие фильтрации (например {'STATUS': '5'} для завершённых задач)
+    - group_by: группировка по полям (например ['RESPONSIBLE_ID', 'STATUS'])
+    """
+    return await analyze_export_file(file_path, operation, fields, condition, group_by)
+
+
+@mcp.tool()
+async def export_task_fields_to_json(filename: Optional[str] = None) -> Dict[str, Any]:
+    """Экспорт описания полей задач в JSON файл
+    - filename: имя файла (опционально). Если не указано, сформируется автоматически
+    
+    Возвращает информацию об экспорте полей
+    """
+    from .bitrixWork import get_fields_by_task
+    
+    try:
+        fields = await get_fields_by_task()
+        
+        exports_dir = Path("exports")
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not filename:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"task_fields_{ts}.json"
+        
+        file_path = exports_dir / filename
+        
+        with file_path.open("w", encoding="utf-8") as f:
+            json.dump(fields, f, ensure_ascii=False, indent=2)
+        
+        return {
+            "entity": "task_fields", 
+            "count": len(fields), 
+            "file": str(file_path)
+        }
+    except Exception as exc:
+        return {"error": str(exc), "count": 0}
+    

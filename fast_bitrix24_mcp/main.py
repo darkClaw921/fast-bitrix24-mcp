@@ -7,6 +7,7 @@ from .tools.userfields import mcp as userfields_mcp
 from .tools.user import mcp as user_mcp
 from .tools.company import mcp as company_mcp
 from .tools.contact import mcp as contact_mcp
+from .tools.task import mcp as task_mcp
 from .tools.helper import mcp as helper_mcp
 from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
 from datetime import datetime
@@ -36,6 +37,7 @@ mcp.mount('fields', userfields_mcp, True)
 mcp.mount("user", user_mcp, True)
 mcp.mount("company", company_mcp, True)
 mcp.mount("contact", contact_mcp, True)
+mcp.mount("task", task_mcp, True)
 mcp.mount("helper", helper_mcp, True)
 
 @mcp.prompt(description="главный промт для взаимодействия с сервером который нужно использовать каждый раз при взаимодействии с сервером")
@@ -46,6 +48,7 @@ def main_prompt() -> str:
     при любом взаимодействии с сущностями сначало нужно получить все доступные поля сущности,
     используй get_all_info_fields. 
     если поле имеет тип enumeration, то значения полях это id значений поля а чтобы получить значение нужно использовать информацию из get_all_info_fields
+    чтобы узнать приоритет задачи сначала получи все поля задачь
     """
     # return PromptMessage(role="user", content=TextContent(type="text", text=content))
     return content
