@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/darkclaw921-fast-bitrix24-mcp-badge.png)](https://mseep.ai/app/darkclaw921-fast-bitrix24-mcp)
+
 ![PyPI - Format](https://img.shields.io/pypi/format/fast-bitrix24-mcp)
 ![PyPI - Status](https://img.shields.io/pypi/status/fast-bitrix24-mcp)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/fast-bitrix24-mcp)
