@@ -74,6 +74,13 @@
   - вызывать инструменты работы с полями (`tools/userfields.py`), со сделками (`tools/deal.py`) и с задачами (`tools/task.py`),
   - запрашивать промпты (`promts/promts.py`) и использовать главный промпт `main_prompt` (`fast_bitrix24_mcp/main.py`).
 
+### Аутентификация
+- Все HTTP-запросы к агрегатору `bitrix24-main` защищены проверкой токена по схеме Bearer.
+- Провайдер: `StaticTokenVerifier` (модуль `fastmcp.server.auth.providers.jwt`), инициализируется в `fast_bitrix24_mcp/main.py` с использованием `AUTH_TOKEN`.
+- Источник токена: переменная окружения `AUTH_TOKEN` (загрузка через `python-dotenv`).
+- Ожидается заголовок `Authorization: Bearer <AUTH_TOKEN>`.
+- При отсутствии `AUTH_TOKEN` сервер не запускается.
+
 ### Конфигурация окружения
 - Переменная окружения `WEBHOOK` — URL вебхука Bitrix24. Загружается через `python-dotenv` (`.env`).
 - Зависимости (см. `pyproject.toml`): `fastmcp`, `orm-bitrix24`, `fast-bitrix24`, `langchain-mcp-adapters`, `langchain[openai]`, `langgraph`, `loguru`, `python-dotenv`.

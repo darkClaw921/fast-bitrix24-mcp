@@ -119,7 +119,7 @@ async def get_task(task_id: int) -> str:
         return f"Ошибка при получении задачи {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def create_new_task(fields: dict[str, Any]) -> str:
     """Создать новую задачу
     fields: dict[str, Any] - поля задачи
@@ -163,7 +163,7 @@ async def create_new_task(fields: dict[str, Any]) -> str:
         return f"Ошибка при создании задачи: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def update_existing_task(task_id: int, fields: dict[str, Any]) -> str:
     """Обновить существующую задачу
     task_id: int - идентификатор задачи
@@ -194,7 +194,7 @@ async def update_existing_task(task_id: int, fields: dict[str, Any]) -> str:
         return f"Ошибка при обновлении задачи {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def delete_existing_task(task_id: int) -> str:
     """Удалить задачу
     task_id: int - идентификатор задачи
@@ -234,7 +234,7 @@ async def get_task_comments_list(task_id: int) -> str:
         return f"Ошибка при получении комментариев к задаче {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def add_comment_to_task(task_id: int, message: str, author_id: Optional[int] = None) -> str:
     """Добавить комментарий к задаче
     task_id: int - идентификатор задачи
@@ -252,7 +252,7 @@ async def add_comment_to_task(task_id: int, message: str, author_id: Optional[in
         return f"Ошибка при добавлении комментария к задаче {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def update_comment_in_task(task_id: int, comment_id: int, message: str) -> str:
     """Обновить комментарий к задаче
     task_id: int - идентификатор задачи
@@ -267,7 +267,7 @@ async def update_comment_in_task(task_id: int, comment_id: int, message: str) ->
         return f"Ошибка при обновлении комментария {comment_id} к задаче {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def delete_comment_from_task(task_id: int, comment_id: int) -> str:
     """Удалить комментарий к задаче
     task_id: int - идентификатор задачи  
@@ -307,7 +307,7 @@ async def get_task_checklist_items(task_id: int) -> str:
         return f"Ошибка при получении чеклиста задачи {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def add_checklist_item_to_task(task_id: int, title: str, is_complete: bool = False) -> str:
     """Добавить пункт в чеклист задачи
     task_id: int - идентификатор задачи
@@ -325,7 +325,7 @@ async def add_checklist_item_to_task(task_id: int, title: str, is_complete: bool
         return f"Ошибка при добавлении пункта в чеклист задачи {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def delete_checklist_item_from_task(task_id: int, item_id: int) -> str:
     """Удалить пункт из чеклиста задачи
     task_id: int - идентификатор задачи
@@ -383,7 +383,7 @@ async def get_task_time_tracking(task_id: int) -> str:
         return f"Ошибка при получении времени выполнения задачи {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def add_time_to_task(task_id: int, seconds: int, comment: str = "", user_id: Optional[int] = None) -> str:
     """Добавить запись о затраченном времени к задаче
     task_id: int - идентификатор задачи
@@ -410,7 +410,7 @@ async def add_time_to_task(task_id: int, seconds: int, comment: str = "", user_i
         return f"Ошибка при добавлении времени к задаче {task_id}: {str(e)}"
 
 
-@mcp.tool()
+# @mcp.tool()
 async def delete_time_from_task(task_id: int, item_id: int) -> str:
     """Удалить запись о затраченном времени
     task_id: int - идентификатор задачи

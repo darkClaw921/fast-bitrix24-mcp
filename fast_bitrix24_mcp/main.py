@@ -11,6 +11,9 @@ from .tools.task import mcp as task_mcp
 from .tools.helper import mcp as helper_mcp
 from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 today=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 # from fastmcp.server.auth import BearerAuthProvider
 # from fastmcp.server.auth.providers.bearer import RSAKeyPair
@@ -26,19 +29,35 @@ today=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 # )
 
 
-# mcp = FastMCP("bitrix24", auth=auth)
-mcp = FastMCP("bitrix24-main")
+# Аутентификация Bearer токеном из .env (AUTH_TOKEN). Обязательна для запуска.
+load_dotenv()
+AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+
+if not AUTH_TOKEN:
+    raise RuntimeError("AUTH_TOKEN не задан в окружении (.env). Установите AUTH_TOKEN для запуска защищённого сервера.")
+
+# Используем StaticTokenVerifier для проверки фиксированного Bearer токена из окружения
+auth = StaticTokenVerifier(
+    tokens={
+        AUTH_TOKEN: {
+            "client_id": "authorized_user",
+            "scopes": ["read", "write"]
+        }
+    },
+    required_scopes=["read"]
+)
+mcp = FastMCP("bitrix24-main", auth=auth)
 
 
-mcp.mount("userfields", userfields_mcp_resource, True)
-mcp.mount("promts", promts_mcp, True)
-mcp.mount("deal", deal_mcp, True)
-mcp.mount('fields', userfields_mcp, True)
-mcp.mount("user", user_mcp, True)
-mcp.mount("company", company_mcp, True)
-mcp.mount("contact", contact_mcp, True)
-mcp.mount("task", task_mcp, True)
-mcp.mount("helper", helper_mcp, True)
+mcp.mount(prefix="userfields", server=userfields_mcp_resource, as_proxy=True)
+mcp.mount(prefix="promts", server=promts_mcp, as_proxy=True)
+mcp.mount(prefix="deal", server=deal_mcp, as_proxy=True)
+mcp.mount(prefix="fields", server=userfields_mcp, as_proxy=True)
+mcp.mount(prefix="user", server=user_mcp, as_proxy=True)
+mcp.mount(prefix="company", server=company_mcp, as_proxy=True)
+mcp.mount(prefix="contact", server=contact_mcp, as_proxy=True)
+mcp.mount(prefix="task", server=task_mcp, as_proxy=True)
+mcp.mount(prefix="helper", server=helper_mcp, as_proxy=True)
 
 @mcp.prompt(description="главный промт для взаимодействия с сервером который нужно использовать каждый раз при взаимодействии с сервером")
 def main_prompt() -> str:
@@ -70,4 +89,4 @@ def main_prompt() -> str:
 
 if __name__ == "__main__":
     # mcp.run(transport="stdio")
-   mcp.run(transport="sse", host="0.0.0.0", port=8000, timeout=10)
+    mcp.run(transport="http", host="0.0.0.0", port=8000, timeout=10)
