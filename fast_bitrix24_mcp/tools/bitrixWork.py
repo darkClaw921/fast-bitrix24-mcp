@@ -118,6 +118,40 @@ async def get_fields_by_company() -> list[dict]:
     return fieldsTemp
 
 
+async def get_fields_by_lead() -> list[dict]:
+    """Получение всех полей для лида (включая пользовательские)"""
+    try:
+        logger.info(f"Получение всех полей для сделки")
+        # Метод .fields не требует параметров, используем get_all
+        result = await bit.get_all(f'crm.lead.fields')
+        
+        if not result:
+            logger.warning(f"Не получены поля для лида")
+            return []
+        
+        # result приходит в виде списка словарей, а не словаря словарей
+        if isinstance(result, dict):
+            # Если результат - словарь полей (ключ = имя поля, значение = данные поля)
+            fields = []
+            for field_name, field_data in result.items():
+                if isinstance(field_data, dict):
+                    # Добавляем имя поля в данные, если его там нет
+                    if 'NAME' not in field_data:
+                        field_data['NAME'] = field_name
+
+                    fields.append(field_data)
+        else:
+            # Если результат - список полей
+            fields = [field_data for field_data in result]
+        
+        
+        
+        logger.info(f"Получено {len(fields)} полей для лида")
+        return fields
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении полей для сделки: {e}")
+        raise
 
 
 async def get_users_by_filter(filter_fields: dict={}) -> list[dict] | dict:

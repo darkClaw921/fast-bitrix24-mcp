@@ -45,6 +45,14 @@
     - Для дат можно писать: `"DATE_CREATE >= today and DATE_CREATE < tomorrow"` или использовать точные ISO-строки.
   - Использует `orm-bitrix24` (`Deal.get_manager(bitrix)`) и тул `get_all_info_fields` из `tools/userfields.py`.
 
+- `fast_bitrix24_mcp/tools/lead.py`
+  - Сервер MCP с именем `lead`.
+  - Инструменты:
+    - `list_lead(filter_fields: dict[str, any] = {}, fields_id: list[str] = ["ID", "TITLE"])` — выборка лидов по фильтрам, поддержка `*` и `select`, форматирование полей в человеко-читаемом виде (включая `enumeration`).
+  - Вспомогательные детали:
+    - Получение схемы полей лида через `crm.lead.fields` с унификацией структуры под `prepare_fields_to_humman_format`.
+    - Экспорт лидов поддерживается через общий инструмент `export_entities_to_json(entity="lead", ...)` из `tools/helper.py`.
+
 - `fast_bitrix24_mcp/tools/task.py`
   - Сервер MCP с именем `tasks`.
   - Инструменты для управления задачами: создание, обновление, удаление, получение списка и деталей.

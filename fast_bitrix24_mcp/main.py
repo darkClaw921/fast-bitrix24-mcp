@@ -9,6 +9,7 @@ from .tools.company import mcp as company_mcp
 from .tools.contact import mcp as contact_mcp
 from .tools.task import mcp as task_mcp
 from .tools.helper import mcp as helper_mcp
+from .tools.lead import mcp as lead_mcp
 from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
 from datetime import datetime
 import os
@@ -58,6 +59,7 @@ mcp.mount(prefix="company", server=company_mcp, as_proxy=True)
 mcp.mount(prefix="contact", server=contact_mcp, as_proxy=True)
 mcp.mount(prefix="task", server=task_mcp, as_proxy=True)
 mcp.mount(prefix="helper", server=helper_mcp, as_proxy=True)
+mcp.mount(prefix="lead", server=lead_mcp, as_proxy=True)
 
 @mcp.prompt(description="главный промт для взаимодействия с сервером который нужно использовать каждый раз при взаимодействии с сервером")
 def main_prompt() -> str:
@@ -68,6 +70,8 @@ def main_prompt() -> str:
     используй get_all_info_fields. 
     если поле имеет тип enumeration, то значения полях это id значений поля а чтобы получить значение нужно использовать информацию из get_all_info_fields
     чтобы узнать приоритет задачи сначала получи все поля задачь
+    чтобы узнать текущую дату и время используй datetime_now
+
     """
     # return PromptMessage(role="user", content=TextContent(type="text", text=content))
     return content

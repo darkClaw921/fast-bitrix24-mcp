@@ -5,7 +5,7 @@ from pprint import pprint
 from dotenv import load_dotenv
 import json
 # from bitrixWork import get_fields_by_deal
-from .bitrixWork import get_fields_by_deal, get_fields_by_user, get_fields_by_contact, get_fields_by_company, get_fields_by_task
+from .bitrixWork import get_fields_by_deal, get_fields_by_user, get_fields_by_contact, get_fields_by_company, get_fields_by_task, get_fields_by_lead
 load_dotenv()
 # Инициализация клиента Bitrix24
 webhook = os.getenv("WEBHOOK")
@@ -25,12 +25,12 @@ mcp = FastMCP("userfields")
 @mcp.tool()
 async def get_all_info_fields(entity:list[str]=['all'], isText:bool=True) -> str | dict:
     """
-    Получение всех ID, названий и значений полей сделки, контакта, компании, задач
+    Получение всех ID, названий и значений полей сделки, контакта, компании, задач, лида
     args:
-        entity: list[str] - ['deal', 'contact', 'company', 'task', 'user'] or ['all']
+        entity: list[str] - ['deal', 'contact', 'company', 'task', 'user', 'lead'] or ['all']
         isText: bool - True - возвращает текст, False - возвращает словарь
     return:
-        allText: str - все ID, названий и значения полей сделки, контакта, компании, задач и также id,value значений полей типа enumeration
+        allText: str - все ID, названий и значения полей сделки, контакта, компании, задач, лида и также id,value значений полей типа enumeration
     """
     
     # bitrix = Bitrix(webhook)
@@ -42,11 +42,12 @@ async def get_all_info_fields(entity:list[str]=['all'], isText:bool=True) -> str
         'contact': [],
         'company': [],
         'user': [],
-        'task': []
+        'task': [],
+        'lead': []
     }
 
     if entity == ['all']:
-        entity = ['deal', 'contact', 'company', 'task', 'user']
+        entity = ['deal', 'contact', 'company', 'task', 'user', 'lead']
 
     for item in entity:
         fields = []  # инициализация по умолчанию
@@ -60,7 +61,8 @@ async def get_all_info_fields(entity:list[str]=['all'], isText:bool=True) -> str
             fields = await get_fields_by_task()
         elif item == 'user':
             fields = await get_fields_by_user()
-
+        elif item == 'lead':
+            fields = await get_fields_by_lead()
         for field in fields:
             if field["type"] == 'enumeration':
                 text=f'{field["NAME"]} ({field["type"]})'

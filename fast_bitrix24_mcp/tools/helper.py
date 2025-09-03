@@ -83,6 +83,7 @@ async def export_entities_to_json(entity: str, filter_fields: Dict[str, Any] = {
 
     method_map = {
         "deal": "crm.deal.list",
+        "lead": "crm.lead.list",
         "contact": "crm.contact.list",
         "company": "crm.company.list",
         "user": "user.get",
