@@ -169,11 +169,18 @@ def _compare(lhs: Any, op: str, rhs: Any) -> bool:
             tz = ldt.tzinfo if isinstance(ldt, datetime) else None
             rdt = _keyword_to_datetime(rhs, tz=tz)
         if ldt is not None and rdt is not None:
-            # Выравниваем TZ: если один aware, другой naive — переносим tzinfo
+            # Выравниваем TZ: если один aware, другой naive — интерпретируем naive как московское время
+            moscow_tz = pytz.timezone("Europe/Moscow")
             if (ldt.tzinfo is not None) and (rdt.tzinfo is None):
-                rdt = rdt.replace(tzinfo=ldt.tzinfo)
+                # Naive datetime интерпретируем как московское время
+                rdt = moscow_tz.localize(rdt)
             if (ldt.tzinfo is None) and (rdt.tzinfo is not None):
-                ldt = ldt.replace(tzinfo=rdt.tzinfo)
+                # Naive datetime интерпретируем как московское время
+                ldt = moscow_tz.localize(ldt)
+            # Если оба aware, но с разными TZ — конвертируем в московское время для сравнения
+            if (ldt.tzinfo is not None) and (rdt.tzinfo is not None):
+                ldt = ldt.astimezone(moscow_tz)
+                rdt = rdt.astimezone(moscow_tz)
             if op == ">":
                 return ldt > rdt
             if op == ">=":
