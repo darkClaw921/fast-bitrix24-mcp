@@ -13,7 +13,7 @@ if webhook:
 else:
     raise ValueError("WEBHOOK environment variable is required")
 
-logger.add("logs/workBitrix_{time}.log",format="{time:YYYY-MM-DD HH:mm}:{level}:{file}:{line}:{message} ", rotation="100 MB", retention="10 days", level="DEBUG")
+logger.add("logs/workBitrix_{time}.log",format="{time:YYYY-MM-DD HH:mm}:{level}:{file}:{line}:{message} ", rotation="100 MB", retention="10 days", level="INFO")
 
 
 async def get_deal_by_id(deal_id: int) -> dict:
