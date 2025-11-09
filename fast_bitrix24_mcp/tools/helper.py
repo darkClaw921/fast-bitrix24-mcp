@@ -1,5 +1,7 @@
 from mcp.server.fastmcp.server import FastMCP
 import pytz
+import re
+import hashlib
 
 from mcp.server.fastmcp import FastMCP, Context
 from typing import List, Dict, Any, Optional, Union
@@ -10,9 +12,14 @@ from dotenv import load_dotenv
 load_dotenv()
 import os
 from .bitrixWork import bit
+from loguru import logger
 
 
 mcp = FastMCP("helper")
+
+# Настройка кэша
+CACHE_DIR = Path("cache")
+CACHE_TTL_SECONDS = 3600  # 1 час
 
 
 def prepare_fields_to_humman_format(fields: dict, all_info_fields: dict) -> dict:
@@ -69,6 +76,66 @@ def prepare_fields_to_humman_format(fields: dict, all_info_fields: dict) -> dict
     return result
 
 
+def _generate_cache_key(entity: str, filter_fields: Dict[str, Any], select_fields: List[str]) -> str:
+    """Генерирует ключ кэша на основе параметров запроса."""
+    # Создаем стабильное представление параметров для хеширования
+    cache_data = {
+        "entity": entity.lower(),
+        "filter_fields": json.dumps(filter_fields, sort_keys=True, ensure_ascii=False),
+        "select_fields": json.dumps(sorted(select_fields), ensure_ascii=False)
+    }
+    cache_string = json.dumps(cache_data, sort_keys=True, ensure_ascii=False)
+    cache_hash = hashlib.md5(cache_string.encode('utf-8')).hexdigest()
+    return f"{entity.lower()}_{cache_hash}"
+
+
+def _get_cache_path(cache_key: str) -> Path:
+    """Возвращает путь к файлу кэша."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return CACHE_DIR / f"{cache_key}.json"
+
+
+def _load_from_cache(cache_key: str) -> Optional[List[Dict[str, Any]]]:
+    """Загружает данные из кэша, если они не устарели."""
+    cache_path = _get_cache_path(cache_key)
+    if not cache_path.exists():
+        return None
+    
+    try:
+        with cache_path.open("r", encoding="utf-8") as f:
+            cache_data = json.load(f)
+        
+        # Проверяем TTL
+        cached_at = datetime.fromisoformat(cache_data["cached_at"])
+        age = (datetime.now() - cached_at).total_seconds()
+        
+        if age > CACHE_TTL_SECONDS:
+            logger.info(f"Кэш для ключа {cache_key} устарел (возраст: {age:.0f} сек), удаляем")
+            cache_path.unlink()
+            return None
+        
+        logger.info(f"Используем кэш для ключа {cache_key} (возраст: {age:.0f} сек)")
+        return cache_data["data"]
+    except Exception as e:
+        logger.warning(f"Ошибка при чтении кэша {cache_key}: {e}")
+        return None
+
+
+def _save_to_cache(cache_key: str, data: List[Dict[str, Any]]) -> None:
+    """Сохраняет данные в кэш."""
+    try:
+        cache_path = _get_cache_path(cache_key)
+        cache_data = {
+            "cached_at": datetime.now().isoformat(),
+            "data": data
+        }
+        with cache_path.open("w", encoding="utf-8") as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        logger.info(f"Данные сохранены в кэш для ключа {cache_key}")
+    except Exception as e:
+        logger.warning(f"Ошибка при сохранении кэша {cache_key}: {e}")
+
+
 @mcp.tool()
 async def export_entities_to_json(entity: str, filter_fields: Dict[str, Any] = {}, select_fields: List[str] = ["*"], filename: Optional[str] = None) -> Dict[str, Any]:
     """Экспорт элементов сущности в JSON
@@ -93,21 +160,38 @@ async def export_entities_to_json(entity: str, filter_fields: Dict[str, Any] = {
     if entity not in method_map:
         return {"error": f"unsupported entity: {entity}", "count": 0}
 
-    try:
-        if entity == "task":
-            # Используем кастомную функцию для задач
-            order = {"ID": "DESC"}  # По умолчанию
-            if 'order' in filter_fields:
-                order = filter_fields.pop('order')
-            items = await get_tasks_by_filter(filter_fields, select_fields, order)
-        else:
-            # Стандартные сущности CRM
-            params: Dict[str, Any] = {"filter": filter_fields}
-            if select_fields and select_fields != ["*"]:
-                params["select"] = select_fields
-            items = await bit.get_all(method_map[entity], params=params)
-    except Exception as exc:
-        return {"error": str(exc), "count": 0}
+    # Для задач нужно учесть order в ключе кэша
+    filter_fields_for_cache = filter_fields.copy()
+    
+    # Проверяем кэш перед запросом к API
+    cache_key = _generate_cache_key(entity, filter_fields_for_cache, select_fields)
+    cached_items = _load_from_cache(cache_key)
+    
+    if cached_items is not None:
+        items = cached_items
+        logger.info(f"Использованы данные из кэша для {entity}, количество записей: {len(items)}")
+    else:
+        # Выполняем запрос к API
+        try:
+            if entity == "task":
+                # Используем кастомную функцию для задач
+                order = {"ID": "DESC"}  # По умолчанию
+                filter_fields_for_api = filter_fields.copy()  # Копия для API запроса
+                if 'order' in filter_fields_for_api:
+                    order = filter_fields_for_api.pop('order')
+                items = await get_tasks_by_filter(filter_fields_for_api, select_fields, order)
+            else:
+                # Стандартные сущности CRM
+                params: Dict[str, Any] = {"filter": filter_fields}
+                if select_fields and select_fields != ["*"]:
+                    params["select"] = select_fields
+                items = await bit.get_all(method_map[entity], params=params)
+            
+            # Сохраняем в кэш только при успешном запросе
+            _save_to_cache(cache_key, items)
+        except Exception as exc:
+            logger.error(f"Ошибка при запросе к Bitrix24 для {entity}: {exc}")
+            return {"error": str(exc), "count": 0}
 
     # Обработка результата
     if isinstance(items, dict):
@@ -322,13 +406,120 @@ def _ensure_list(value: Optional[Union[str, List[str]]]) -> List[str]:
     return [value]
 
 
+def _normalize_condition(condition: Optional[Union[str, Dict[str, Any]]]) -> Optional[Union[str, Dict[str, Any]]]:
+    """Нормализует условие: парсит JSON строку и преобразует формат с операторами в строках."""
+    if not condition:
+        return None
+    
+    # Если условие - строка, пытаемся распарсить как JSON
+    if isinstance(condition, str):
+        # Проверяем, не является ли это JSON строкой
+        condition_stripped = condition.strip()
+        if condition_stripped.startswith('{') and condition_stripped.endswith('}'):
+            try:
+                # Парсим JSON, но обрабатываем случай с дублирующимися ключами
+                # Используем регулярное выражение для поиска всех пар ключ-значение
+                # Находим все пары "ключ": "значение" или "ключ": значение
+                pattern = r'"([^"]+)"\s*:\s*"([^"]*)"'
+                matches = re.findall(pattern, condition_stripped)
+                if matches:
+                    # Собираем все значения для каждого ключа
+                    field_values = {}
+                    for field, value in matches:
+                        if field not in field_values:
+                            field_values[field] = []
+                        field_values[field].append(value)
+                    # Преобразуем в нормализованный формат
+                    normalized = {}
+                    for field, values in field_values.items():
+                        if len(values) == 1:
+                            normalized[field] = values[0]
+                        else:
+                            # Несколько значений - создаем словарь с операторами
+                            normalized[field] = {}
+                            for val in values:
+                                val_stripped = val.strip()
+                                for op in [">=", "<=", ">", "<", "==", "!=", "="]:
+                                    if val_stripped.startswith(op):
+                                        op_value = val_stripped[len(op):].strip()
+                                        normalized[field][op] = op_value
+                                        break
+                                else:
+                                    # Нет оператора, добавляем как равенство
+                                    normalized[field]["=="] = val
+                    condition = normalized
+                else:
+                    # Стандартный парсинг если regex не сработал
+                    condition = json.loads(condition)
+            except (json.JSONDecodeError, Exception):
+                # Если не JSON или ошибка парсинга, оставляем как строку с операторами
+                return condition
+        else:
+            # Обычная строка с операторами
+            return condition
+    
+    # Если условие - словарь, обрабатываем формат с операторами в значениях
+    if isinstance(condition, dict):
+        normalized = {}
+        for field, value in condition.items():
+            if isinstance(value, str):
+                # Проверяем, содержит ли значение оператор в начале
+                value_stripped = value.strip()
+                op_found = False
+                for op in [">=", "<=", ">", "<", "==", "!=", "="]:
+                    if value_stripped.startswith(op):
+                        # Извлекаем оператор и значение
+                        op_value = value_stripped[len(op):].strip()
+                        # Если поле уже есть, создаем словарь с операторами
+                        if field in normalized:
+                            if not isinstance(normalized[field], dict):
+                                # Преобразуем существующее значение в словарь
+                                normalized[field] = {"==": normalized[field]}
+                            normalized[field][op] = op_value
+                        else:
+                            normalized[field] = {op: op_value}
+                        op_found = True
+                        break
+                if not op_found:
+                    # Нет оператора, простое равенство
+                    normalized[field] = value
+            elif isinstance(value, dict):
+                # Уже правильный формат
+                normalized[field] = value
+            elif isinstance(value, list):
+                # Список значений - обрабатываем каждое
+                normalized[field] = {}
+                for val in value:
+                    if isinstance(val, str):
+                        val_stripped = val.strip()
+                        for op in [">=", "<=", ">", "<", "==", "!=", "="]:
+                            if val_stripped.startswith(op):
+                                op_value = val_stripped[len(op):].strip()
+                                normalized[field][op] = op_value
+                                break
+                        else:
+                            normalized[field]["=="] = val
+                    else:
+                        normalized[field]["=="] = val
+            else:
+                # Простое значение
+                normalized[field] = value
+        return normalized
+    
+    return condition
+
+
 @mcp.tool()
 async def analyze_export_file(file_path: str, operation: str, fields: Optional[Union[str, List[str]]] = None, condition: Optional[Union[str, Dict[str, Any]]] = None, group_by: Optional[List[str]] = None) -> Dict[str, Any]:
     """Анализ экспортированных данных из файла JSON
     - file_path: путь к файлу JSON
     - operation: операция анализа ('count', 'sum', 'avg', 'min', 'max')
     - fields: список полей для анализа (например ['UF_CRM_1749724770090', 'TITLE'])
-    - condition: условие фильтрации (например {'UF_CRM_1749724770090': '47'}) это значит что найдет все записи где UF_CRM_1749724770090 равно 47
+    - condition: условие фильтрации. Может быть:
+      - строкой с операторами: 'DATE_CREATE >= "2025-11-03 00:00:00" and DATE_CREATE <= "2025-11-09 23:59:59"'
+      - словарем: {'DATE_CREATE': {'>=': '2025-11-03T00:00:00', '<=': '2025-11-09T23:59:59'}}
+      - словарем с операторами в строках: {'DATE_CREATE': '>= 2025-11-03T00:00:00'} (будет автоматически преобразован)
+      - JSON строкой: '{"DATE_CREATE": ">= 2025-11-03T00:00:00"}' (будет автоматически распарсена)
     - group_by: группировка по полям (например ['UF_CRM_1749724770090'])
     """
     
@@ -343,7 +534,9 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
     if not isinstance(data, list):
         return {"error": "json must contain a list of records"}
 
-    filtered = _apply_condition(data, condition)
+    # Нормализуем условие перед применением
+    normalized_condition = _normalize_condition(condition)
+    filtered = _apply_condition(data, normalized_condition)
     groups = _ensure_list(group_by) if group_by else []
     op = operation.lower()
     fields_list = _ensure_list(fields)

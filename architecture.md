@@ -12,6 +12,8 @@
 - `example_chats/`: примеры сценариев (диалогов)
 - `test_mcp.py`, `mcp_test.py`: утилиты/скрипты для проверки/демонстрации работы
 - `analyze_file.py`: скрипт командной строки для анализа экспортированных JSON файлов. Поддерживает операции count, sum, avg, min, max с фильтрацией по условиям и группировкой по полям
+- `exports/`: папка для экспортированных JSON файлов
+- `cache/`: папка для файлового кэша запросов к Bitrix24 API (TTL 1 час, создается автоматически)
 
 ### Пакет `fast_bitrix24_mcp`
 
@@ -101,8 +103,12 @@
 - `fast_bitrix24_mcp/tools/helper.py`
   - Сервер MCP с именем `helper`.
   - Вспомогательные функции для экспорта и анализа данных:
-    - `export_entities_to_json(entity, filter_fields, select_fields, filename)` — экспорт сущностей (`deal`, `contact`, `company`, `user`, `task`) в JSON файлы в папку `exports/`
-    - `analyze_export_file(file_path, operation, fields, condition, group_by)` — анализ экспортированных данных с операциями `count`, `sum`, `avg`, `min`, `max`
+    - `export_entities_to_json(entity, filter_fields, select_fields, filename)` — экспорт сущностей (`deal`, `contact`, `company`, `user`, `task`) в JSON файлы в папку `exports/`. **Особенность**: использует файловый кэш с TTL 1 час для избежания повторных запросов к Bitrix24 API при ограничениях. Кэш хранится в папке `cache/`, ключ кэша генерируется на основе параметров запроса (entity, filter_fields, select_fields). При повторном запросе с теми же параметрами данные загружаются из кэша, если он не устарел.
+    - `analyze_export_file(file_path, operation, fields, condition, group_by)` — анализ экспортированных данных с операциями `count`, `sum`, `avg`, `min`, `max`. Поддерживает сложные условия фильтрации:
+      - Строка с операторами: `'DATE_CREATE >= "2025-11-03 00:00:00" and DATE_CREATE <= "2025-11-09 23:59:59"'`
+      - Словарь с операторами: `{'DATE_CREATE': {'>=': '2025-11-03T00:00:00', '<=': '2025-11-09T23:59:59'}}`
+      - Словарь с операторами в строках: `{'DATE_CREATE': '>= 2025-11-03T00:00:00'}` (автоматически преобразуется)
+      - JSON строка: `'{"DATE_CREATE": ">= 2025-11-03T00:00:00"}'` (автоматически распарсивается, поддерживает дублирующиеся ключи)
     - `analyze_tasks_export(file_path, operation, fields, condition, group_by)` — специализированный анализ для задач
     - `export_task_fields_to_json(filename)` — экспорт описания полей задач
     - `datetime_now()` — получение текущей даты и времени в московской зоне
@@ -113,6 +119,13 @@
     - `_parse_datetime(value)` — парсинг дат/времени: ISO-8601, `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`.
     - `_keyword_to_datetime(keyword, tz)` — преобразование ключевых слов `today`/`tomorrow`/`yesterday` в начало соответствующего дня с учётом TZ.
     - `_compare(lhs, op, rhs)` — сравнение чисел, дат/времени и строк; для дат поддерживаются операторы `>`, `>=`, `<`, `<=`. **Особенность**: при сравнении дат naive datetime (без часового пояса) интерпретируются как московское время (Europe/Moscow), aware datetime с разными часовыми поясами конвертируются в московское время для корректного сравнения.
+    - `_normalize_condition(condition)` — нормализация условий фильтрации: парсит JSON строки, обрабатывает дублирующиеся ключи, преобразует операторы в строках в правильный формат словаря.
+  - Функции кэширования для `export_entities_to_json`:
+    - `_generate_cache_key(entity, filter_fields, select_fields)` — генерация уникального ключа кэша на основе параметров запроса с использованием MD5 хеша
+    - `_get_cache_path(cache_key)` — получение пути к файлу кэша в папке `cache/`
+    - `_load_from_cache(cache_key)` — загрузка данных из кэша с проверкой TTL (1 час), возвращает `None` если кэш устарел или отсутствует
+    - `_save_to_cache(cache_key, data)` — сохранение данных в кэш с метаданными времени создания
+  - Логирование операций с кэшем через `loguru` (уровень `INFO`).
 
 - `fast_bitrix24_mcp/tools/bitrixWork.py`
   - Вспомогательные функции для работы с API Bitrix24.
