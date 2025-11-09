@@ -410,6 +410,7 @@ async def analyze_tasks_export(file_path: str, operation: str, fields: Optional[
     - condition: условие фильтрации (например {'STATUS': '5'} для завершённых задач)
     - group_by: группировка по полям (например ['RESPONSIBLE_ID', 'STATUS'])
     """
+    fields=[field.lower() for field in fields]
     return await analyze_export_file(file_path, operation, fields, condition, group_by)
 
 
