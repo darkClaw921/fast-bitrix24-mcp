@@ -111,6 +111,7 @@
 
 - `fast_bitrix24_mcp/tools/bitrixWork.py`
   - Вспомогательные функции для работы с API Bitrix24.
+  - Настройка логирования: уровень логирования библиотеки `fast_bitrix24` установлен на `WARNING` для подавления DEBUG сообщений (используется стандартный модуль `logging`). Логирование проекта через `loguru` настроено на уровень `INFO` с записью в файлы `logs/workBitrix_{time}.log`.
   - Функции для работы с задачами:
     - `get_fields_by_task()` — получение полей задач через `tasks.task.getFields`
     - `get_task_by_id(task_id: int)` — получение задачи по ID через `tasks.task.get`

@@ -6,6 +6,11 @@ from datetime import datetime, timedelta
 from loguru import logger
 import asyncio
 import traceback
+import logging
+
+# Настройка уровня логирования для библиотеки fast_bitrix24 - отключаем DEBUG логи
+logging.getLogger('fast_bitrix24').setLevel(logging.WARNING)
+
 load_dotenv()
 webhook = os.getenv('WEBHOOK')
 if webhook:
@@ -80,7 +85,7 @@ async def get_fields_by_user() -> list[dict]:
 async def get_fields_by_contact() -> list[dict]:
     """Получение всех полей для контакта (включая пользовательские)"""
     fields = await bit.get_all('crm.contact.fields')
-    pprint(fields)
+    # pprint(fields)
     fieldsTemp=[]
     
     # Handle both dict and list responses
@@ -167,7 +172,7 @@ async def get_deals_by_filter(filter_fields: dict, select_fields: list[str]) -> 
     Получает сделку по фильтру
     """
     deal = await bit.get_all('crm.deal.list', params={'filter': filter_fields, 'select': select_fields})
-    pprint(deal)
+    # pprint(deal)
     if isinstance(deal, dict):
         if deal.get('order0000000000'):
             deal=deal['order0000000000']
@@ -472,7 +477,7 @@ async def add_task_comment(task_id: int, fields: dict) -> dict:
     try:
         # Fix: Use correct API method
         items={'TASKID': int(task_id), 'FIELDS': fields}
-        pprint(items)
+        
         result = await bit.call('task.commentitem.add', items, raw=True)
         logger.info(f"Добавлен комментарий к задаче {task_id}")
         return result

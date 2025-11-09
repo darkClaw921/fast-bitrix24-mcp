@@ -75,7 +75,7 @@ async def list_deal(filter_fields: dict[str,str]={}, fields_id: list[str]=["ID",
     for deal in prepare_deals:
         
         text+=f'=={deal["TITLE"]}==\n'
-        pprint(deal)
+        # pprint(deal)
         prepare_deal=await prepare_fields_to_humman_format(deal, all_info_fields)
         for key, value in prepare_deal.items():
             text+=f'  {key}: {value}\n'

@@ -23,7 +23,7 @@ async def list_user(filter_fields: dict[str,str]={}) -> dict:
     """
     all_info_fields=await get_all_info_fields(['user'], isText=False)
     all_info_fields=all_info_fields['user']
-    pprint(all_info_fields)
+    # pprint(all_info_fields)
     # userfields = await get_fields_by_user()
     users = await get_users_by_filter(filter_fields)
     text=''

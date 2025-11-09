@@ -1,6 +1,6 @@
 [project]
 name = "fast-bitrix24-mcp"
-version = "1.0.2"
+version = "1.0.3"
 description = "MCP сервер для взаимодействия с Bitrix24 rest api на основе fast-bitrix24"
 readme = "README.md"
 requires-python = ">=3.12"
