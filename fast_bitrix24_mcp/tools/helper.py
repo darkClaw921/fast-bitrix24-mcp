@@ -354,7 +354,8 @@ def _record_matches_simple_expr(record: Dict[str, Any], expr: str) -> bool:
             field, value = part.split(op, 1)
             field = field.strip()
             rhs = _parse_value(value)
-            lhs = record.get(field)
+            # Используем поиск поля без учета регистра
+            lhs = _get_field_value_case_insensitive(record, field)
             # Превращаем одиночное '=' в '=='
             if op == "=":
                 op_to_use = "=="
@@ -369,7 +370,124 @@ def _record_matches_simple_expr(record: Dict[str, Any], expr: str) -> bool:
     return False
 
 
+def _snake_to_camel(snake_str: str) -> str:
+    """Преобразует UPPER_SNAKE_CASE или lower_snake_case в camelCase.
+    Если строка уже в camelCase (нет символа '_'), возвращает её без изменений.
+    """
+    if '_' not in snake_str:
+        # Уже в camelCase или другом формате без подчеркиваний
+        return snake_str
+    components = snake_str.split('_')
+    # Первая часть в нижнем регистре, остальные с заглавной первой буквой
+    return components[0].lower() + ''.join(x.capitalize() for x in components[1:])
+
+
+def _get_field_value_case_insensitive(record: Dict[str, Any], field_name: str) -> Any:
+    """Получает значение поля из записи независимо от регистра ключа."""
+    # Сначала пробуем точное совпадение
+    if field_name in record:
+        return record[field_name]
+    # Затем пробуем в нижнем регистре
+    field_lower = field_name.lower()
+    if field_lower in record:
+        return record[field_lower]
+    # Ищем по всем ключам без учета регистра
+    for key, value in record.items():
+        if key.lower() == field_lower:
+            return value
+    return None
+
+
+def _get_field_value_for_task(record: Dict[str, Any], field_name: str) -> Any:
+    """Получает значение поля из записи задачи с поддержкой преобразования UPPER_SNAKE_CASE в camelCase."""
+    # Сначала пробуем точное совпадение
+    if field_name in record:
+        return record[field_name]
+    # Затем пробуем в нижнем регистре
+    field_lower = field_name.lower()
+    if field_lower in record:
+        return record[field_lower]
+    # Пробуем преобразовать UPPER_SNAKE_CASE в camelCase
+    camel_case = _snake_to_camel(field_name)
+    if camel_case in record:
+        return record[camel_case]
+    # Ищем по всем ключам без учета регистра
+    for key, value in record.items():
+        if key.lower() == field_lower:
+            return value
+    # Ищем по camelCase версии без учета регистра
+    camel_lower = camel_case.lower()
+    for key, value in record.items():
+        if key.lower() == camel_lower:
+            return value
+    return None
+
+
+def _record_matches_simple_expr_for_task(record: Dict[str, Any], expr: str) -> bool:
+    """Проверяет соответствие записи задачи условию с поддержкой преобразования форматов полей."""
+    or_parts = [p.strip() for p in expr.split(" or ") if p.strip()]
+    def eval_and(and_expr: str) -> bool:
+        and_parts = [p.strip() for p in and_expr.split(" and ") if p.strip()]
+        for part in and_parts:
+            op = None
+            for candidate in [">=", "<=", "==", "!=", ">", "<", "="]:
+                if candidate in part:
+                    op = candidate
+                    break
+            if not op:
+                return False
+            field, value = part.split(op, 1)
+            field = field.strip()
+            rhs = _parse_value(value)
+            # Используем поиск поля для задач с преобразованием формата
+            lhs = _get_field_value_for_task(record, field)
+            # Превращаем одиночное '=' в '=='
+            if op == "=":
+                op_to_use = "=="
+            else:
+                op_to_use = op
+            if not _compare(lhs, op_to_use, rhs):
+                return False
+        return True
+    for grp in or_parts:
+        if eval_and(grp):
+            return True
+    return False
+
+
+def _apply_condition_for_task(records: List[Dict[str, Any]], condition: Optional[Union[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Применяет условие к записям задач с поддержкой преобразования форматов полей."""
+    if not condition:
+        return records
+    filtered: List[Dict[str, Any]] = []
+    if isinstance(condition, str):
+        for r in records:
+            if _record_matches_simple_expr_for_task(r, condition):
+                filtered.append(r)
+        return filtered
+    for r in records:
+        matched = True
+        for field, expected in condition.items():
+            # Получаем значение поля для задачи с преобразованием формата
+            lhs = _get_field_value_for_task(r, field)
+            if isinstance(expected, dict):
+                for op, rhs in expected.items():
+                    if not _compare(lhs, op, rhs):
+                        matched = False
+                        break
+                if not matched:
+                    break
+            else:
+                if lhs != expected:
+                    matched = False
+                    break
+        if matched:
+            filtered.append(r)
+    return filtered
+
+
 def _apply_condition(records: List[Dict[str, Any]], condition: Optional[Union[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Применяет условие к записям с поддержкой поиска полей без учета регистра."""
     if not condition:
         return records
     filtered: List[Dict[str, Any]] = []
@@ -381,7 +499,8 @@ def _apply_condition(records: List[Dict[str, Any]], condition: Optional[Union[st
     for r in records:
         matched = True
         for field, expected in condition.items():
-            lhs = r.get(field)
+            # Получаем значение поля независимо от регистра
+            lhs = _get_field_value_case_insensitive(r, field)
             if isinstance(expected, dict):
                 for op, rhs in expected.items():
                     if not _compare(lhs, op, rhs):
@@ -406,8 +525,23 @@ def _ensure_list(value: Optional[Union[str, List[str]]]) -> List[str]:
     return [value]
 
 
+def _extract_operator_from_key(key: str) -> tuple[str, str]:
+    """Извлекает оператор из ключа, если он есть. Возвращает (оператор, имя_поля)."""
+    # Операторы, которые могут быть в начале ключа
+    operators = [">=", "<=", "!=", "==", ">", "<", "!"]
+    for op in operators:
+        if key.startswith(op):
+            field_name = key[len(op):]
+            # Преобразуем оператор в стандартный формат
+            if op == "!":
+                return ("!=", field_name)
+            return (op, field_name)
+    # Нет оператора в ключе
+    return ("==", key)
+
+
 def _normalize_condition(condition: Optional[Union[str, Dict[str, Any]]]) -> Optional[Union[str, Dict[str, Any]]]:
-    """Нормализует условие: парсит JSON строку и преобразует формат с операторами в строках."""
+    """Нормализует условие: парсит JSON строку и преобразует формат с операторами в ключах и значениях."""
     if not condition:
         return None
     
@@ -417,40 +551,9 @@ def _normalize_condition(condition: Optional[Union[str, Dict[str, Any]]]) -> Opt
         condition_stripped = condition.strip()
         if condition_stripped.startswith('{') and condition_stripped.endswith('}'):
             try:
-                # Парсим JSON, но обрабатываем случай с дублирующимися ключами
-                # Используем регулярное выражение для поиска всех пар ключ-значение
-                # Находим все пары "ключ": "значение" или "ключ": значение
-                pattern = r'"([^"]+)"\s*:\s*"([^"]*)"'
-                matches = re.findall(pattern, condition_stripped)
-                if matches:
-                    # Собираем все значения для каждого ключа
-                    field_values = {}
-                    for field, value in matches:
-                        if field not in field_values:
-                            field_values[field] = []
-                        field_values[field].append(value)
-                    # Преобразуем в нормализованный формат
-                    normalized = {}
-                    for field, values in field_values.items():
-                        if len(values) == 1:
-                            normalized[field] = values[0]
-                        else:
-                            # Несколько значений - создаем словарь с операторами
-                            normalized[field] = {}
-                            for val in values:
-                                val_stripped = val.strip()
-                                for op in [">=", "<=", ">", "<", "==", "!=", "="]:
-                                    if val_stripped.startswith(op):
-                                        op_value = val_stripped[len(op):].strip()
-                                        normalized[field][op] = op_value
-                                        break
-                                else:
-                                    # Нет оператора, добавляем как равенство
-                                    normalized[field]["=="] = val
-                    condition = normalized
-                else:
-                    # Стандартный парсинг если regex не сработал
-                    condition = json.loads(condition)
+                # Парсим JSON
+                parsed = json.loads(condition_stripped)
+                condition = parsed
             except (json.JSONDecodeError, Exception):
                 # Если не JSON или ошибка парсинга, оставляем как строку с операторами
                 return condition
@@ -458,52 +561,64 @@ def _normalize_condition(condition: Optional[Union[str, Dict[str, Any]]]) -> Opt
             # Обычная строка с операторами
             return condition
     
-    # Если условие - словарь, обрабатываем формат с операторами в значениях
+    # Если условие - словарь, обрабатываем формат с операторами в ключах и значениях
     if isinstance(condition, dict):
         normalized = {}
-        for field, value in condition.items():
-            if isinstance(value, str):
-                # Проверяем, содержит ли значение оператор в начале
-                value_stripped = value.strip()
-                op_found = False
-                for op in [">=", "<=", ">", "<", "==", "!=", "="]:
-                    if value_stripped.startswith(op):
-                        # Извлекаем оператор и значение
-                        op_value = value_stripped[len(op):].strip()
-                        # Если поле уже есть, создаем словарь с операторами
-                        if field in normalized:
-                            if not isinstance(normalized[field], dict):
-                                # Преобразуем существующее значение в словарь
-                                normalized[field] = {"==": normalized[field]}
-                            normalized[field][op] = op_value
-                        else:
-                            normalized[field] = {op: op_value}
-                        op_found = True
-                        break
-                if not op_found:
-                    # Нет оператора, простое равенство
-                    normalized[field] = value
-            elif isinstance(value, dict):
-                # Уже правильный формат
-                normalized[field] = value
-            elif isinstance(value, list):
-                # Список значений - обрабатываем каждое
-                normalized[field] = {}
-                for val in value:
-                    if isinstance(val, str):
-                        val_stripped = val.strip()
-                        for op in [">=", "<=", ">", "<", "==", "!=", "="]:
-                            if val_stripped.startswith(op):
-                                op_value = val_stripped[len(op):].strip()
-                                normalized[field][op] = op_value
-                                break
-                        else:
-                            normalized[field]["=="] = val
-                    else:
-                        normalized[field]["=="] = val
+        for field_key, value in condition.items():
+            # Извлекаем оператор из ключа (если есть)
+            op, field_name = _extract_operator_from_key(field_key)
+            
+            # Нормализуем имя поля в нижний регистр для совместимости
+            field_name_lower = field_name.lower()
+            
+            # Если поле уже есть в normalized, создаем словарь с операторами
+            if field_name_lower in normalized:
+                if not isinstance(normalized[field_name_lower], dict):
+                    # Преобразуем существующее значение в словарь
+                    normalized[field_name_lower] = {"==": normalized[field_name_lower]}
+                normalized[field_name_lower][op] = value
             else:
-                # Простое значение
-                normalized[field] = value
+                # Проверяем, содержит ли значение оператор в начале
+                if isinstance(value, str):
+                    value_stripped = value.strip()
+                    op_found = False
+                    for val_op in [">=", "<=", ">", "<", "==", "!=", "="]:
+                        if value_stripped.startswith(val_op):
+                            # Извлекаем оператор и значение
+                            op_value = value_stripped[len(val_op):].strip()
+                            # Используем оператор из значения, если он есть
+                            normalized[field_name_lower] = {val_op: op_value}
+                            op_found = True
+                            break
+                    if not op_found:
+                        # Используем оператор из ключа или равенство
+                        normalized[field_name_lower] = {op: value}
+                elif isinstance(value, dict):
+                    # Уже правильный формат, но нужно добавить оператор из ключа если он есть
+                    if op != "==":
+                        # Если в ключе был оператор, добавляем его к словарю
+                        value[op] = value.get(op, value.get("=="))
+                    normalized[field_name_lower] = value
+                elif isinstance(value, list):
+                    # Список значений - обрабатываем каждое
+                    normalized[field_name_lower] = {}
+                    for val in value:
+                        if isinstance(val, str):
+                            val_stripped = val.strip()
+                            val_op_found = False
+                            for val_op in [">=", "<=", ">", "<", "==", "!=", "="]:
+                                if val_stripped.startswith(val_op):
+                                    op_value = val_stripped[len(val_op):].strip()
+                                    normalized[field_name_lower][val_op] = op_value
+                                    val_op_found = True
+                                    break
+                            if not val_op_found:
+                                normalized[field_name_lower][op] = val
+                        else:
+                            normalized[field_name_lower][op] = val
+                else:
+                    # Простое значение - используем оператор из ключа или равенство
+                    normalized[field_name_lower] = {op: value}
         return normalized
     
     return condition
@@ -542,7 +657,7 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
     fields_list = _ensure_list(fields)
 
     def group_key(rec: Dict[str, Any]) -> tuple:
-        return tuple(rec.get(g) for g in groups) if groups else tuple()
+        return tuple(_get_field_value_case_insensitive(rec, g) for g in groups) if groups else tuple()
 
     grouped: Dict[tuple, List[Dict[str, Any]]] = {}
     for rec in filtered:
@@ -558,7 +673,7 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
         for fld in fields_list:
             values: List[float] = []
             for r in records:
-                v = r.get(fld)
+                v = _get_field_value_case_insensitive(r, fld)
                 try:
                     if v is None:
                         continue
@@ -601,17 +716,107 @@ async def datetime_now() -> str :
     return datetime.now(timezone).isoformat()
 
 
+def _normalize_condition_for_task(condition: Optional[Union[str, Dict[str, Any]]]) -> Optional[Union[str, Dict[str, Any]]]:
+    """Нормализует условие для задач: преобразует имена полей в camelCase и обрабатывает операторы."""
+    normalized = _normalize_condition(condition)
+    if not normalized or isinstance(normalized, str):
+        return normalized
+    
+    # Преобразуем имена полей в camelCase для задач
+    task_normalized = {}
+    for field_key, value in normalized.items():
+        # Преобразуем имя поля в camelCase
+        camel_field = _snake_to_camel(field_key)
+        task_normalized[camel_field] = value
+    
+    return task_normalized
+
+
 @mcp.tool()
 async def analyze_tasks_export(file_path: str, operation: str, fields: Optional[Union[str, List[str]]] = None, condition: Optional[Union[str, Dict[str, Any]]] = None, group_by: Optional[List[str]] = None) -> Dict[str, Any]:
     """Анализ экспортированных задач из файла JSON
     - file_path: путь к файлу JSON с экспортом задач
     - operation: операция анализа ('count', 'sum', 'avg', 'min', 'max')
-    - fields: список полей для анализа (например ['TIME_ESTIMATE', 'DURATION_FACT'])
-    - condition: условие фильтрации (например {'STATUS': '5'} для завершённых задач)
-    - group_by: группировка по полям (например ['RESPONSIBLE_ID', 'STATUS'])
+    - fields: список полей для анализа (например ['TIME_ESTIMATE', 'DURATION_FACT'] или ['timeEstimate', 'durationFact'])
+    - condition: условие фильтрации (например {'STATUS': '5'} или {'status': '5'} для завершённых задач)
+    - group_by: группировка по полям (например ['RESPONSIBLE_ID', 'STATUS'] или ['responsibleId', 'status'])
+    
+    Поддерживает преобразование UPPER_SNAKE_CASE в camelCase для полей задач.
     """
-    fields=[field.lower() for field in fields]
-    return await analyze_export_file(file_path, operation, fields, condition, group_by)
+    path = Path(file_path)
+    if not path.exists():
+        return {"error": f"file not found: {file_path}"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": f"failed to read json: {exc}"}
+
+    if not isinstance(data, list):
+        return {"error": "json must contain a list of records"}
+
+    # Нормализуем условие для задач (преобразует имена полей в camelCase)
+    normalized_condition = _normalize_condition_for_task(condition)
+    filtered = _apply_condition_for_task(data, normalized_condition)
+    
+    # Преобразуем поля и группировку в camelCase
+    groups = _ensure_list(group_by) if group_by else []
+    groups_camel = [_snake_to_camel(g) for g in groups]
+    
+    op = operation.lower()
+    fields_list = _ensure_list(fields)
+    fields_camel = [_snake_to_camel(f) if isinstance(f, str) else f for f in fields_list] if fields_list else []
+
+    def group_key(rec: Dict[str, Any]) -> tuple:
+        return tuple(_get_field_value_for_task(rec, g) for g in groups_camel) if groups_camel else tuple()
+
+    grouped: Dict[tuple, List[Dict[str, Any]]] = {}
+    for rec in filtered:
+        key = group_key(rec)
+        grouped.setdefault(key, []).append(rec)
+
+    def aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if op == "count":
+            return {"count": len(records)}
+        results: Dict[str, Any] = {}
+        if not fields_camel:
+            return {"error": "fields are required for this operation"}
+        for fld in fields_camel:
+            values: List[float] = []
+            for r in records:
+                v = _get_field_value_for_task(r, fld)
+                try:
+                    if v is None:
+                        continue
+                    values.append(float(v))
+                except Exception:
+                    continue
+            if not values:
+                results[fld] = None
+                continue
+            if op == "sum":
+                results[fld] = sum(values)
+            elif op == "avg":
+                results[fld] = sum(values) / len(values)
+            elif op == "min":
+                results[fld] = min(values)
+            elif op == "max":
+                results[fld] = max(values)
+            else:
+                results[fld] = None
+        return results
+
+    output: Dict[str, Any] = {"operation": op}
+    if groups_camel:
+        output["group_by"] = groups  # Возвращаем оригинальные имена полей
+        output["result"] = []
+        for key, records in grouped.items():
+            group_obj = {groups[idx]: key[idx] for idx, g in enumerate(groups_camel)}
+            output["result"].append({"group": group_obj, "values": aggregate(records)})
+    else:
+        output["result"] = aggregate(filtered)
+
+    output["total_records"] = len(filtered)
+    return output
 
 
 @mcp.tool()
