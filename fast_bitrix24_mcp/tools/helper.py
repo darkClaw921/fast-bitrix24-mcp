@@ -248,6 +248,8 @@ def _compare(lhs: Any, op: str, rhs: Any) -> bool:
         # 2) Сравнение дат/времени
         ldt = _parse_datetime(lhs)
         rdt = _parse_datetime(rhs)
+        # Сохраняем оригинальную строку rhs для проверки формата даты
+        rhs_original_str = rhs if isinstance(rhs, str) else None
         if rdt is None and isinstance(rhs, str):
             # Поддержка ключевых слов относительно локального времени и TZ левого операнда
             tz = ldt.tzinfo if isinstance(ldt, datetime) else None
@@ -265,6 +267,20 @@ def _compare(lhs: Any, op: str, rhs: Any) -> bool:
             if (ldt.tzinfo is not None) and (rdt.tzinfo is not None):
                 ldt = ldt.astimezone(moscow_tz)
                 rdt = rdt.astimezone(moscow_tz)
+            
+            # Для операторов < и > с датами без времени: интерпретируем как "до конца дня" для < и "после конца дня" для >
+            if rhs_original_str and op in ("<", ">"):
+                # Проверяем, является ли rhs датой без времени (формат YYYY-MM-DD)
+                rhs_stripped = rhs_original_str.strip()
+                if re.match(r'^\d{4}-\d{2}-\d{2}$', rhs_stripped):
+                    if op == "<":
+                        # "< 2025-11-11" означает "до конца дня 11 ноября", т.е. < 2025-11-12 00:00:00
+                        rdt = rdt + timedelta(days=1)
+                        rdt = rdt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    elif op == ">":
+                        # "> 2025-11-11" означает "после конца дня 11 ноября", т.е. > 2025-11-11 23:59:59
+                        rdt = rdt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
             if op == ">":
                 return ldt > rdt
             if op == ">=":
@@ -502,6 +518,7 @@ def _apply_condition(records: List[Dict[str, Any]], condition: Optional[Union[st
             # Получаем значение поля независимо от регистра
             lhs = _get_field_value_case_insensitive(r, field)
             if isinstance(expected, dict):
+                # Проверяем ВСЕ операторы для поля - все должны выполниться (AND логика)
                 for op, rhs in expected.items():
                     if not _compare(lhs, op, rhs):
                         matched = False
