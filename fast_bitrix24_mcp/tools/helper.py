@@ -642,7 +642,7 @@ def _normalize_condition(condition: Optional[Union[str, Dict[str, Any]]]) -> Opt
 
 
 @mcp.tool()
-async def analyze_export_file(file_path: str, operation: str, fields: Optional[Union[str, List[str]]] = None, condition: Optional[Union[str, Dict[str, Any]]] = None, group_by: Optional[List[str]] = None) -> Dict[str, Any]:
+async def analyze_export_file(file_path: str, operation: str, fields: Optional[Union[str, List[str]]] = None, condition: Optional[Union[str, Dict[str, Any]]] = None, group_by: Optional[List[str]] = None, include_records: bool = False) -> Dict[str, Any]:
     """Анализ экспортированных данных из файла JSON
     - file_path: путь к файлу JSON
     - operation: операция анализа ('count', 'sum', 'avg', 'min', 'max')
@@ -653,6 +653,7 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
       - словарем с операторами в строках: {'DATE_CREATE': '>= 2025-11-03T00:00:00'} (будет автоматически преобразован)
       - JSON строкой: '{"DATE_CREATE": ">= 2025-11-03T00:00:00"}' (будет автоматически распарсена)
     - group_by: группировка по полям (например ['UF_CRM_1749724770090'])
+    - include_records: если True, возвращает массив всех отфильтрованных записей с указанными полями
     """
     
     path = Path(file_path)
@@ -723,6 +724,18 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
         output["result"] = aggregate(filtered)
 
     output["total_records"] = len(filtered)
+    
+    # Если запрошены записи, добавляем их в ответ с указанными полями
+    if include_records and fields_list:
+        records_output = []
+        for rec in filtered:
+            record_dict = {}
+            for fld in fields_list:
+                value = _get_field_value_case_insensitive(rec, fld)
+                record_dict[fld] = value
+            records_output.append(record_dict)
+        output["records"] = records_output
+    
     return output
 
 @mcp.tool()
@@ -750,13 +763,14 @@ def _normalize_condition_for_task(condition: Optional[Union[str, Dict[str, Any]]
 
 
 @mcp.tool()
-async def analyze_tasks_export(file_path: str, operation: str, fields: Optional[Union[str, List[str]]] = None, condition: Optional[Union[str, Dict[str, Any]]] = None, group_by: Optional[List[str]] = None) -> Dict[str, Any]:
+async def analyze_tasks_export(file_path: str, operation: str, fields: Optional[Union[str, List[str]]] = None, condition: Optional[Union[str, Dict[str, Any]]] = None, group_by: Optional[List[str]] = None, include_records: bool = False) -> Dict[str, Any]:
     """Анализ экспортированных задач из файла JSON
     - file_path: путь к файлу JSON с экспортом задач
     - operation: операция анализа ('count', 'sum', 'avg', 'min', 'max')
     - fields: список полей для анализа (например ['TIME_ESTIMATE', 'DURATION_FACT'] или ['timeEstimate', 'durationFact'])
     - condition: условие фильтрации (например {'STATUS': '5'} или {'status': '5'} для завершённых задач)
     - group_by: группировка по полям (например ['RESPONSIBLE_ID', 'STATUS'] или ['responsibleId', 'status'])
+    - include_records: если True, возвращает массив всех отфильтрованных записей с указанными полями
     
     Поддерживает преобразование UPPER_SNAKE_CASE в camelCase для полей задач.
     """
@@ -833,6 +847,21 @@ async def analyze_tasks_export(file_path: str, operation: str, fields: Optional[
         output["result"] = aggregate(filtered)
 
     output["total_records"] = len(filtered)
+    
+    # Если запрошены записи, добавляем их в ответ с указанными полями
+    if include_records and fields_list:
+        records_output = []
+        for rec in filtered:
+            record_dict = {}
+            for fld in fields_list:
+                # Преобразуем поле в camelCase для поиска
+                fld_camel = _snake_to_camel(fld) if isinstance(fld, str) else fld
+                value = _get_field_value_for_task(rec, fld_camel)
+                # Используем оригинальное имя поля в ответе
+                record_dict[fld] = value
+            records_output.append(record_dict)
+        output["records"] = records_output
+    
     return output
 
 
