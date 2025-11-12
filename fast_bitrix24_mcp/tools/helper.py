@@ -226,8 +226,22 @@ def _compare(lhs: Any, op: str, rhs: Any) -> bool:
     """
     try:
         if op in ("==", "="):
+            # Нормализуем типы: если оба значения можно преобразовать в числа, сравниваем как числа
+            try:
+                lnum = float(lhs)
+                rnum = float(rhs)
+                return lnum == rnum
+            except Exception:
+                pass
             return lhs == rhs
         if op == "!=":
+            # Нормализуем типы: если оба значения можно преобразовать в числа, сравниваем как числа
+            try:
+                lnum = float(lhs)
+                rnum = float(rhs)
+                return lnum != rnum
+            except Exception:
+                pass
             return lhs != rhs
 
         # 1) Числовое сравнение
@@ -494,7 +508,8 @@ def _apply_condition_for_task(records: List[Dict[str, Any]], condition: Optional
                 if not matched:
                     break
             else:
-                if lhs != expected:
+                # Используем _compare для нормализации типов (строка "123" == число 123)
+                if not _compare(lhs, "==", expected):
                     matched = False
                     break
         if matched:
@@ -526,7 +541,8 @@ def _apply_condition(records: List[Dict[str, Any]], condition: Optional[Union[st
                 if not matched:
                     break
             else:
-                if lhs != expected:
+                # Используем _compare для нормализации типов (строка "123" == число 123)
+                if not _compare(lhs, "==", expected):
                     matched = False
                     break
         if matched:
@@ -726,14 +742,23 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
     output["total_records"] = len(filtered)
     
     # Если запрошены записи, добавляем их в ответ с указанными полями
-    if include_records and fields_list:
+    if include_records:
         records_output = []
-        for rec in filtered:
-            record_dict = {}
-            for fld in fields_list:
-                value = _get_field_value_case_insensitive(rec, fld)
-                record_dict[fld] = value
-            records_output.append(record_dict)
+        # Проверяем, запрошены ли все поля
+        if fields_list and (fields_list == ["*"] or "*" in fields_list):
+            # Возвращаем все поля записи
+            records_output = filtered.copy()
+        elif fields_list:
+            # Возвращаем только указанные поля
+            for rec in filtered:
+                record_dict = {}
+                for fld in fields_list:
+                    value = _get_field_value_case_insensitive(rec, fld)
+                    record_dict[fld] = value
+                records_output.append(record_dict)
+        else:
+            # Если fields не указан, возвращаем все поля
+            records_output = filtered.copy()
         output["records"] = records_output
     
     return output
@@ -849,17 +874,26 @@ async def analyze_tasks_export(file_path: str, operation: str, fields: Optional[
     output["total_records"] = len(filtered)
     
     # Если запрошены записи, добавляем их в ответ с указанными полями
-    if include_records and fields_list:
+    if include_records:
         records_output = []
-        for rec in filtered:
-            record_dict = {}
-            for fld in fields_list:
-                # Преобразуем поле в camelCase для поиска
-                fld_camel = _snake_to_camel(fld) if isinstance(fld, str) else fld
-                value = _get_field_value_for_task(rec, fld_camel)
-                # Используем оригинальное имя поля в ответе
-                record_dict[fld] = value
-            records_output.append(record_dict)
+        # Проверяем, запрошены ли все поля
+        if fields_list and (fields_list == ["*"] or "*" in fields_list):
+            # Возвращаем все поля записи
+            records_output = filtered.copy()
+        elif fields_list:
+            # Возвращаем только указанные поля
+            for rec in filtered:
+                record_dict = {}
+                for fld in fields_list:
+                    # Преобразуем поле в camelCase для поиска
+                    fld_camel = _snake_to_camel(fld) if isinstance(fld, str) else fld
+                    value = _get_field_value_for_task(rec, fld_camel)
+                    # Используем оригинальное имя поля в ответе
+                    record_dict[fld] = value
+                records_output.append(record_dict)
+        else:
+            # Если fields не указан, возвращаем все поля
+            records_output = filtered.copy()
         output["records"] = records_output
     
     return output
