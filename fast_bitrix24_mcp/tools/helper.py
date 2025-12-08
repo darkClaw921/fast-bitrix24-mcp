@@ -502,7 +502,9 @@ def _apply_condition_for_task(records: List[Dict[str, Any]], condition: Optional
             lhs = _get_field_value_for_task(r, field)
             if isinstance(expected, dict):
                 for op, rhs in expected.items():
-                    if not _compare(lhs, op, rhs):
+                    # Нормализуем оператор (gte -> >=, lte -> <= и т.д.)
+                    normalized_op = _normalize_operator(op)
+                    if not _compare(lhs, normalized_op, rhs):
                         matched = False
                         break
                 if not matched:
@@ -535,7 +537,9 @@ def _apply_condition(records: List[Dict[str, Any]], condition: Optional[Union[st
             if isinstance(expected, dict):
                 # Проверяем ВСЕ операторы для поля - все должны выполниться (AND логика)
                 for op, rhs in expected.items():
-                    if not _compare(lhs, op, rhs):
+                    # Нормализуем оператор (gte -> >=, lte -> <= и т.д.)
+                    normalized_op = _normalize_operator(op)
+                    if not _compare(lhs, normalized_op, rhs):
                         matched = False
                         break
                 if not matched:
@@ -556,6 +560,32 @@ def _ensure_list(value: Optional[Union[str, List[str]]]) -> List[str]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def _normalize_operator(op: str) -> str:
+    """Нормализует оператор: преобразует альтернативные операторы в стандартные.
+    
+    Поддерживаемые альтернативные операторы:
+    - gte, ge -> >=
+    - lte, le -> <=
+    - gt -> >
+    - lt -> <
+    - eq -> ==
+    - ne, neq -> !=
+    """
+    op_lower = op.lower()
+    operator_map = {
+        "gte": ">=",
+        "ge": ">=",
+        "lte": "<=",
+        "le": "<=",
+        "gt": ">",
+        "lt": "<",
+        "eq": "==",
+        "ne": "!=",
+        "neq": "!=",
+    }
+    return operator_map.get(op_lower, op)
 
 
 def _extract_operator_from_key(key: str) -> tuple[str, str]:
@@ -627,11 +657,17 @@ def _normalize_condition(condition: Optional[Union[str, Dict[str, Any]]]) -> Opt
                         # Используем оператор из ключа или равенство
                         normalized[field_name_lower] = {op: value}
                 elif isinstance(value, dict):
-                    # Уже правильный формат, но нужно добавить оператор из ключа если он есть
+                    # Уже правильный формат, но нужно нормализовать операторы и добавить оператор из ключа если он есть
+                    normalized_value = {}
+                    for val_op, val_rhs in value.items():
+                        # Нормализуем оператор (gte -> >=, lte -> <= и т.д.)
+                        normalized_val_op = _normalize_operator(val_op)
+                        normalized_value[normalized_val_op] = val_rhs
                     if op != "==":
-                        # Если в ключе был оператор, добавляем его к словарю
-                        value[op] = value.get(op, value.get("=="))
-                    normalized[field_name_lower] = value
+                        # Если в ключе был оператор, добавляем его к словарю (нормализованный)
+                        normalized_op = _normalize_operator(op)
+                        normalized_value[normalized_op] = normalized_value.get(normalized_op, normalized_value.get("=="))
+                    normalized[field_name_lower] = normalized_value
                 elif isinstance(value, list):
                     # Список значений - обрабатываем каждое
                     normalized[field_name_lower] = {}
@@ -666,6 +702,8 @@ async def analyze_export_file(file_path: str, operation: str, fields: Optional[U
     - condition: условие фильтрации. Может быть:
       - строкой с операторами: 'DATE_CREATE >= "2025-11-03 00:00:00" and DATE_CREATE <= "2025-11-09 23:59:59"'
       - словарем: {'DATE_CREATE': {'>=': '2025-11-03T00:00:00', '<=': '2025-11-09T23:59:59'}}
+      - словарем с альтернативными операторами: {'UF_CRM_H_C3_WON': {'gte': '2025-11-10T00:00:00', 'lte': '2025-11-16T23:59:59'}}
+        Поддерживаемые альтернативные операторы: gte/ge (>=), lte/le (<=), gt (>), lt (<), eq (==), ne/neq (!=)
       - словарем с операторами в строках: {'DATE_CREATE': '>= 2025-11-03T00:00:00'} (будет автоматически преобразован)
       - JSON строкой: '{"DATE_CREATE": ">= 2025-11-03T00:00:00"}' (будет автоматически распарсена)
     - group_by: группировка по полям (например ['UF_CRM_1749724770090'])

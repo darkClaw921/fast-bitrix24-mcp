@@ -11,9 +11,10 @@ from pathlib import Path
 # from userfields import get_all_info_fields
 # from bitrixWork import bit, get_deals_by_filter
 from .userfields import get_all_info_fields
-from .bitrixWork import bit, get_deals_by_filter, get_deal_stages, get_deal_categories, get_all_deal_stages_by_categories, get_stage_history
+from .bitrixWork import bit, get_deals_by_filter, get_deal_stages, get_deal_categories, get_all_deal_stages_by_categories, get_stage_history, get_crm_activities_by_filter, get_tasks_by_filter
 
 from .helper import prepare_fields_to_humman_format
+from loguru import logger
 # bitrix=Bitrix(WEBHOOK)
 WEBHOOK=os.getenv("WEBHOOK")
 # class Deal(_Deal):
@@ -419,6 +420,285 @@ async def get_stage_history_human(entity_type_id: int, owner_id: int = None, fro
         result_text += f"  Общее время: {_format_timedelta(stat['total_time'])}\n\n"
     
     return result_text
+
+
+def _count_workdays(start_date: datetime, end_date: datetime) -> int:
+    """Подсчет рабочих дней между двумя датами (исключая субботу и воскресенье)"""
+    if start_date > end_date:
+        return 0
+    
+    workdays = 0
+    current_date = start_date.date()
+    end_date_only = end_date.date()
+    
+    while current_date <= end_date_only:
+        # Понедельник = 0, Воскресенье = 6
+        weekday = current_date.weekday()
+        if weekday < 5:  # Понедельник-Пятница
+            workdays += 1
+        current_date += timedelta(days=1)
+    
+    return workdays
+
+
+async def _get_deal_activity(deal_id: int, days: int = 3) -> dict:
+    """Получение активности по сделке за указанный период (звонки, комментарии, задачи)
+    
+    Args:
+        deal_id: ID сделки
+        days: Количество дней для проверки активности (по умолчанию 3)
+    
+    Returns:
+        Словарь с информацией об активности:
+        {
+            'has_activity': bool,
+            'last_activity_date': datetime | None,
+            'activities': {
+                'calls': int,
+                'comments': int,
+                'tasks': int
+            }
+        }
+    """
+    now = datetime.now(timezone.utc)
+    from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    from_date_iso = f"{from_date}T00:00:00"
+    
+    activities_count = {
+        'calls': 0,
+        'comments': 0,
+        'tasks': 0
+    }
+    
+    last_activity_date = None
+    
+    try:
+        # Получаем активности CRM (звонки, встречи, email) по сделке
+        activities_filter = {
+            'ENTITY_TYPE': 'DEAL',
+            'ENTITY_ID': deal_id,
+            '>=CREATED': from_date_iso
+        }
+        activities = await get_crm_activities_by_filter(activities_filter, select_fields=['ID', 'TYPE_ID', 'CREATED'])
+        
+        # Подсчитываем звонки (TYPE_ID = '2')
+        calls = [a for a in activities if str(a.get('TYPE_ID', '')) == '2']
+        activities_count['calls'] = len(calls)
+        
+        # Находим последнюю активность
+        for activity in activities:
+            created_str = activity.get('CREATED', '')
+            if created_str:
+                try:
+                    activity_date = _parse_datetime_from_bitrix(created_str)
+                    if last_activity_date is None or activity_date > last_activity_date:
+                        last_activity_date = activity_date
+                except Exception:
+                    pass
+        
+        # Получаем комментарии по сделке
+        try:
+            comments_params = {
+                'filter': {
+                    'ENTITY_TYPE': 'DEAL',
+                    'ENTITY_ID': deal_id
+                }
+            }
+            comments_result = await bit.call('crm.timeline.comment.list', comments_params, raw=True)
+            
+            if comments_result and 'result' in comments_result:
+                comments = comments_result['result'] if isinstance(comments_result['result'], list) else []
+                # Фильтруем по дате
+                recent_comments = [
+                    c for c in comments
+                    if c.get('CREATED', '') >= from_date_iso
+                ]
+                activities_count['comments'] = len(recent_comments)
+                
+                # Обновляем последнюю активность
+                for comment in recent_comments:
+                    created_str = comment.get('CREATED', '')
+                    if created_str:
+                        try:
+                            comment_date = _parse_datetime_from_bitrix(created_str)
+                            if last_activity_date is None or comment_date > last_activity_date:
+                                last_activity_date = comment_date
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(f"Ошибка при получении комментариев для сделки {deal_id}: {e}")
+        
+        # Получаем задачи, связанные со сделкой
+        try:
+            # Задачи связаны через поле UF_CRM_TASK в формате ["D_10"] где D_ - Deal, 10 - ID сделки
+            tasks_filter = {
+                '>=CREATED_DATE': from_date_iso
+            }
+            tasks = await get_tasks_by_filter(
+                tasks_filter,
+                select_fields=['ID', 'TITLE', 'CREATED_DATE', 'UF_CRM_TASK']
+            )
+            
+            # Фильтруем задачи, связанные с нашей сделкой
+            deal_tasks = []
+            deal_prefix = f"D_{deal_id}"
+            for task in tasks:
+                uf_crm_task = task.get('UF_CRM_TASK') or task.get('ufCrmTask')
+                if uf_crm_task:
+                    if isinstance(uf_crm_task, list):
+                        if any(str(item).startswith(deal_prefix) for item in uf_crm_task):
+                            deal_tasks.append(task)
+                    elif isinstance(uf_crm_task, str) and uf_crm_task.startswith(deal_prefix):
+                        deal_tasks.append(task)
+            
+            activities_count['tasks'] = len(deal_tasks)
+            
+            # Обновляем последнюю активность
+            for task in deal_tasks:
+                created_str = task.get('CREATED_DATE') or task.get('createdDate')
+                if created_str:
+                    try:
+                        task_date = _parse_datetime_from_bitrix(created_str)
+                        if last_activity_date is None or task_date > last_activity_date:
+                            last_activity_date = task_date
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Ошибка при получении задач для сделки {deal_id}: {e}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении активности для сделки {deal_id}: {e}")
+    
+    total_activities = activities_count['calls'] + activities_count['comments'] + activities_count['tasks']
+    has_activity = total_activities > 0
+    
+    return {
+        'has_activity': has_activity,
+        'last_activity_date': last_activity_date,
+        'activities': activities_count
+    }
+
+
+@mcp.tool()
+async def get_deals_at_risk(filter_fields: dict[str, str] = {}, fields_id: list[str] = ["ID", "TITLE", "STAGE_ID", "DATE_MODIFY"]) -> str:
+    """Получение сделок, находящихся в риске
+    
+    Сделка считается «в риске», если выполняется одно или несколько условий:
+    • статус сделки не менялся более 5 рабочих дней;
+    • отсутствует активность (звонки, комментарии, задачи) более 3 дней;
+    
+    Args:
+        filter_fields: Дополнительные фильтры для сделок (например, {"CLOSED": "N"})
+        fields_id: Список полей для получения информации о сделках
+    
+    Returns:
+        Текстовая строка со списком сделок в риске с указанием причин
+    """
+    try:
+        # Добавляем обязательные поля
+        required_fields = ['ID', 'TITLE', 'STAGE_ID', 'DATE_MODIFY']
+        for field in required_fields:
+            if field not in fields_id:
+                fields_id.append(field)
+        
+        # Получаем все сделки по фильтру
+        deals = await get_deals_by_filter(filter_fields, fields_id)
+        
+        if isinstance(deals, dict):
+            if deals.get('order0000000000'):
+                deals = deals['order0000000000']
+        
+        if not isinstance(deals, list):
+            deals = []
+        
+        if not deals:
+            return "Сделки по указанным фильтрам не найдены."
+        
+        # Получаем названия стадий
+        stages_info = await get_stages("DEAL_STAGE")
+        stages_dict = {}
+        for category_data in stages_info.values():
+            stages_dict.update(category_data.get('stages', {}))
+        
+        deals_at_risk = []
+        now = datetime.now(timezone.utc)
+        
+        # Проверяем каждую сделку
+        for deal in deals:
+            deal_id = deal.get('ID')
+            deal_title = deal.get('TITLE', f'Сделка #{deal_id}')
+            risk_reasons = []
+            
+            # Проверка 1: Статус не менялся более 5 рабочих дней
+            date_modify_str = deal.get('DATE_MODIFY') or deal.get('DATE_CREATE')
+            if date_modify_str:
+                try:
+                    date_modify = _parse_datetime_from_bitrix(date_modify_str)
+                    workdays_since_modify = _count_workdays(date_modify, now)
+                    
+                    if workdays_since_modify > 5:
+                        risk_reasons.append(f"Статус не менялся {workdays_since_modify} рабочих дней (последнее изменение: {date_modify.strftime('%Y-%m-%d %H:%M:%S')})")
+                except Exception as e:
+                    logger.warning(f"Ошибка при проверке даты изменения сделки {deal_id}: {e}")
+            
+            # Проверка 2: Отсутствует активность более 3 дней
+            activity_info = await _get_deal_activity(deal_id, days=3)
+            if not activity_info['has_activity']:
+                risk_reasons.append("Отсутствует активность (звонки, комментарии, задачи) более 3 дней")
+            elif activity_info['last_activity_date']:
+                # Проверяем, что последняя активность была более 3 дней назад
+                # Используем timedelta для точного сравнения (3 дня = 72 часа)
+                time_since_activity = now - activity_info['last_activity_date']
+                if time_since_activity > timedelta(days=3):
+                    days_since_activity = time_since_activity.days
+                    risk_reasons.append(f"Последняя активность была {days_since_activity} дней назад ({activity_info['last_activity_date'].strftime('%Y-%m-%d %H:%M:%S')})")
+            
+            # Если есть причины риска, добавляем сделку в список
+            if risk_reasons:
+                stage_id = deal.get('STAGE_ID', 'Неизвестно')
+                stage_name = stages_dict.get(stage_id, stage_id)
+                
+                deals_at_risk.append({
+                    'deal_id': deal_id,
+                    'title': deal_title,
+                    'stage': stage_name,
+                    'stage_id': stage_id,
+                    'reasons': risk_reasons,
+                    'activity_info': activity_info
+                })
+        
+        # Формируем результат
+        if not deals_at_risk:
+            return f"Сделок в риске не найдено. Проверено сделок: {len(deals)}."
+        
+        result_text = f"=== Сделки в риске ===\n\n"
+        result_text += f"Всего проверено сделок: {len(deals)}\n"
+        result_text += f"Сделок в риске: {len(deals_at_risk)}\n\n"
+        
+        for idx, deal_info in enumerate(deals_at_risk, 1):
+            result_text += f"{idx}. {deal_info['title']} (ID: {deal_info['deal_id']})\n"
+            result_text += f"   Стадия: {deal_info['stage']} ({deal_info['stage_id']})\n"
+            result_text += f"   Причины риска:\n"
+            for reason in deal_info['reasons']:
+                result_text += f"     • {reason}\n"
+            
+            # Добавляем информацию об активности
+            activity = deal_info['activity_info']['activities']
+            result_text += f"   Активность за последние 3 дня:\n"
+            result_text += f"     • Звонки: {activity['calls']}\n"
+            result_text += f"     • Комментарии: {activity['comments']}\n"
+            result_text += f"     • Задачи: {activity['tasks']}\n"
+            
+            if deal_info['activity_info']['last_activity_date']:
+                result_text += f"   Последняя активность: {deal_info['activity_info']['last_activity_date'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+            
+            result_text += "\n"
+        
+        return result_text
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении сделок в риске: {e}")
+        return f"Ошибка при получении сделок в риске: {str(e)}"
 
 
 if __name__ == "__main__":
