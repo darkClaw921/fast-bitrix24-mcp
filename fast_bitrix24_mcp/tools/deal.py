@@ -20,7 +20,8 @@ WEBHOOK=os.getenv("WEBHOOK")
 # class Deal(_Deal):
 #     pass
 # Deal.get_manager(bitrix)
-
+BATCH_SIZE = 50
+DELAY_BETWEEN_BATCHES = 0.5  # секунды задержки между батчами
 mcp = FastMCP("bitrix24")
 
 
@@ -579,8 +580,355 @@ async def _get_deal_activity(deal_id: int, days: int = 3) -> dict:
     }
 
 
+async def _get_all_deals_activity_batch(deal_ids: list[int | str], days: int = 3, include_comments: bool = True) -> dict[int, dict]:
+    """Получение активности для всех сделок батчами (оптимизированная версия)
+    
+    Получает активность для всех сделок одним набором запросов вместо последовательных вызовов.
+    Это значительно ускоряет работу при большом количестве сделок.
+    
+    Args:
+        deal_ids: Список ID сделок
+        days: Количество дней для проверки активности (по умолчанию 3)
+        include_comments: Получать комментарии для всех сделок (по умолчанию True). Если False, комментарии пропускаются для ускорения работы
+    
+    Returns:
+        Словарь {deal_id: activity_info}, где activity_info имеет структуру:
+        {
+            'has_activity': bool,
+            'last_activity_date': datetime | None,
+            'activities': {
+                'deals': int,      # Все дела (активности) в таймлайне: встречи, звонки, письма, действия и т.д.
+                'calls': int,       # Звонки (TYPE_ID = 2)
+                'comments': int,    # Комментарии
+                'tasks': int        # Задачи
+            }
+        }
+    """
+    if not deal_ids:
+        return {}
+    
+    now = datetime.now(timezone.utc)
+    from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    from_date_iso = f"{from_date}T00:00:00"
+    
+    # Нормализуем deal_ids (приводим к int для сравнения)
+    deal_ids_normalized = [int(did) for did in deal_ids]
+    deal_ids_set = set(deal_ids_normalized)
+    
+    # Инициализируем результат для всех сделок
+    result = {}
+    for deal_id in deal_ids_normalized:
+        result[deal_id] = {
+            'has_activity': False,
+            'last_activity_date': None,
+            'activities': {
+                'deals': 0,  # Все дела (активности) в таймлайне: встречи, звонки, письма, действия и т.д.
+                'calls': 0,  # Звонки (TYPE_ID = 2)
+                'comments': 0,
+                'tasks': 0
+            }
+        }
+    
+    try:
+        # Шаг 1: Получаем все активности CRM для всех сделок одним запросом
+        # Bitrix24 поддерживает фильтр по нескольким ENTITY_ID через оператор @
+        # Но лучше использовать фильтр по дате и затем группировать на клиенте
+        logger.info(
+            f"Получение активностей CRM для {len(deal_ids_normalized)} сделок "
+            f"(период: с {from_date_iso}, сделки: {deal_ids_normalized[:5]}{'...' if len(deal_ids_normalized) > 5 else ''})"
+        )
+        activities_filter = {
+            'ENTITY_TYPE': 'DEAL',
+            '>=CREATED': from_date_iso
+        }
+        all_activities = await get_crm_activities_by_filter(
+            activities_filter, 
+            select_fields=['ID', 'TYPE_ID', 'CREATED', 'ENTITY_ID', 'OWNER_ID', 'OWNER_TYPE_ID', 'PROVIDER_ID', 'PROVIDER_TYPE_ID']
+        )
+        
+        # Нормализуем all_activities в список
+        if not isinstance(all_activities, list):
+            all_activities = []
+        
+        logger.info(f"Получено активностей CRM: {len(all_activities)}")
+        
+        # Группируем активности по сделкам
+        # Активности могут быть связаны со сделкой через:
+        # 1. OWNER_ID (при OWNER_TYPE_ID='2' - сделка) - основной способ
+        # 2. ENTITY_ID (как fallback)
+        deal_activities = {}
+        activities_without_link = 0
+        activities_not_in_deals = 0
+        
+        for activity in all_activities:
+            deal_id_int = None
+            
+            # Сначала проверяем OWNER_ID (основной способ связи со сделкой)
+            owner_id = activity.get('OWNER_ID')
+            owner_type_id = activity.get('OWNER_TYPE_ID')
+            
+            if owner_id and str(owner_type_id) == '2':  # OWNER_TYPE_ID='2' означает сделку
+                try:
+                    deal_id_int = int(owner_id)
+                except (ValueError, TypeError):
+                    pass
+            
+            # Если не нашли через OWNER_ID, проверяем ENTITY_ID как fallback
+            if deal_id_int is None:
+                entity_id = activity.get('ENTITY_ID')
+                if entity_id:
+                    try:
+                        deal_id_int = int(entity_id)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Если нашли ID сделки и она в нашем списке, добавляем активность
+            if deal_id_int and deal_id_int in deal_ids_set:
+                if deal_id_int not in deal_activities:
+                    deal_activities[deal_id_int] = []
+                deal_activities[deal_id_int].append(activity)
+            elif deal_id_int:
+                activities_not_in_deals += 1
+            else:
+                activities_without_link += 1
+        
+        logger.info(
+            f"Группировка активностей: всего {len(all_activities)}, "
+            f"сгруппировано по {len(deal_activities)} сделкам, "
+            f"без связи со сделкой: {activities_without_link}, "
+            f"не в списке сделок: {activities_not_in_deals}"
+        )
+        
+        # Обрабатываем активности для каждой сделки
+        # Дела в таймлайне - это все активности (activities) разных типов:
+        # TYPE_ID = 1: Встреча, TYPE_ID = 2: Звонок, TYPE_ID = 3: Задача, 
+        # TYPE_ID = 4: Письмо, TYPE_ID = 5: Действие, TYPE_ID = 6: Пользовательское действие
+        for deal_id, activities in deal_activities.items():
+            # Подсчитываем звонки (TYPE_ID = '2')
+            calls = [a for a in activities if str(a.get('TYPE_ID', '')) == '2']
+            result[deal_id]['activities']['calls'] = len(calls)
+            
+            # Подсчитываем задачи из активностей CRM
+            # Это включает TYPE_ID='3' (задачи) и TYPE_ID='6' с PROVIDER_ID='CRM_TODO' (задачи CRM)
+            crm_tasks = [
+                a for a in activities 
+                if str(a.get('TYPE_ID', '')) == '3' or 
+                (str(a.get('TYPE_ID', '')) == '6' and 
+                 a.get('PROVIDER_ID') == 'CRM_TODO' and 
+                 a.get('PROVIDER_TYPE_ID') == 'TODO')
+            ]
+            result[deal_id]['activities']['tasks'] += len(crm_tasks)
+            
+            # Подсчитываем все дела (активности) в таймлайне
+            # Это включает все типы: встречи, звонки, задачи, письма, действия и т.д.
+            result[deal_id]['activities']['deals'] = len(activities)
+            
+            # logger.debug(
+            #     f"Сделка {deal_id}: активностей {len(activities)}, "
+            #     f"звонков {len(calls)}, задач {len(crm_tasks)}, дел {len(activities)}"
+            # )
+            
+            # Находим последнюю активность
+            for activity in activities:
+                created_str = activity.get('CREATED', '')
+                if created_str:
+                    try:
+                        activity_date = _parse_datetime_from_bitrix(created_str)
+                        if result[deal_id]['last_activity_date'] is None or activity_date > result[deal_id]['last_activity_date']:
+                            result[deal_id]['last_activity_date'] = activity_date
+                    except Exception:
+                        pass
+        
+        # Шаг 2: Получаем комментарии батчами с ограниченным параллелизмом (если включено)
+        # Обрабатываем батчами по 10 запросов параллельно с задержкой между батчами
+        # Это предотвращает перегрузку API Bitrix24
+        if include_comments:
+            semaphore = asyncio.Semaphore(BATCH_SIZE)
+            
+            logger.info(f"Получение комментариев для {len(deal_ids_normalized)} сделок батчами (размер батча: {BATCH_SIZE}, задержка: {DELAY_BETWEEN_BATCHES}с)")
+            
+            async def get_comments_for_deal(deal_id: int) -> tuple[int, list]:
+                """Получает комментарии для одной сделки с ограничением через семафор"""
+                async with semaphore:  # Ограничиваем количество одновременных запросов
+                    try:
+                        comments_params = {
+                            'filter': {
+                                'ENTITY_TYPE': 'DEAL',
+                                'ENTITY_ID': deal_id
+                            }
+                        }
+                        comments_result = await bit.call('crm.timeline.comment.list', comments_params, raw=True)
+                        
+                        comments = []
+                        if isinstance(comments_result, dict):
+                            if 'result' in comments_result and isinstance(comments_result['result'], list):
+                                comments = comments_result['result']
+                            elif 'error' in comments_result:
+                                logger.warning(f"Ошибка при получении комментариев для сделки {deal_id}: {comments_result.get('error')}")
+                        elif isinstance(comments_result, list):
+                            comments = comments_result
+                        
+                        return deal_id, comments
+                    except Exception as e:
+                        logger.warning(f"Ошибка при получении комментариев для сделки {deal_id}: {e}")
+                        return deal_id, []
+            
+            # Обрабатываем батчами с задержками
+            total_batches = (len(deal_ids_normalized) + BATCH_SIZE - 1) // BATCH_SIZE
+            all_comments_results = []
+            
+            for batch_idx in range(0, len(deal_ids_normalized), BATCH_SIZE):
+                batch_deal_ids = deal_ids_normalized[batch_idx:batch_idx + BATCH_SIZE]
+                batch_num = (batch_idx // BATCH_SIZE) + 1
+                
+                logger.info(f"Обработка батча комментариев {batch_num}/{total_batches}: сделки {batch_idx+1}-{min(batch_idx+BATCH_SIZE, len(deal_ids_normalized))} из {len(deal_ids_normalized)}")
+                
+                # Выполняем запросы для текущего батча
+                comments_tasks = [get_comments_for_deal(deal_id) for deal_id in batch_deal_ids]
+                batch_results = await asyncio.gather(*comments_tasks)
+                all_comments_results.extend(batch_results)
+                
+                # Добавляем задержку между батчами (кроме последнего)
+                if batch_idx + BATCH_SIZE < len(deal_ids_normalized):
+                    await asyncio.sleep(DELAY_BETWEEN_BATCHES)
+            
+            # Обрабатываем результаты
+            for deal_id, comments in all_comments_results:
+                # Фильтруем по дате
+                recent_comments = [
+                    c for c in comments
+                    if c.get('CREATED', '') >= from_date_iso
+                ]
+                result[deal_id]['activities']['comments'] = len(recent_comments)
+                
+                # Обновляем последнюю активность
+                for comment in recent_comments:
+                    created_str = comment.get('CREATED', '')
+                    if created_str:
+                        try:
+                            comment_date = _parse_datetime_from_bitrix(created_str)
+                            if result[deal_id]['last_activity_date'] is None or comment_date > result[deal_id]['last_activity_date']:
+                                result[deal_id]['last_activity_date'] = comment_date
+                        except Exception:
+                            pass
+        else:
+            logger.info(f"Получение комментариев пропущено (include_comments=False)")
+        
+        # Шаг 3: Получаем все задачи за период один раз
+        # Получаем задачи, созданные или измененные за период (задачи - это тоже активность)
+        logger.info(f"Получение задач за период для {len(deal_ids)} сделок")
+        # Фильтруем по дате создания ИЛИ дате изменения (задачи могут быть созданы раньше, но изменены недавно)
+        tasks_filter = {
+            '>=CREATED_DATE': from_date_iso
+        }
+        all_tasks = await get_tasks_by_filter(
+            tasks_filter,
+            select_fields=['ID', 'TITLE', 'CREATED_DATE', 'CHANGED_DATE', 'CLOSED_DATE', 'UF_CRM_TASK']
+        )
+        
+        # Нормализуем all_tasks в список
+        if not isinstance(all_tasks, list):
+            all_tasks = []
+        
+        # Группируем задачи по сделкам
+        deal_tasks_dict = {}
+        for deal_id in deal_ids_normalized:
+            deal_tasks_dict[deal_id] = []
+        
+        for task in all_tasks:
+            uf_crm_task = task.get('UF_CRM_TASK') or task.get('ufCrmTask')
+            if uf_crm_task:
+                # Проверяем все сделки
+                for deal_id in deal_ids_normalized:
+                    deal_prefix = f"D_{deal_id}"
+                    task_matched = False
+                    
+                    if isinstance(uf_crm_task, list):
+                        if any(str(item).startswith(deal_prefix) for item in uf_crm_task):
+                            task_matched = True
+                    elif isinstance(uf_crm_task, str) and uf_crm_task.startswith(deal_prefix):
+                        task_matched = True
+                    
+                    if task_matched:
+                        # Проверяем, что задача была активна в указанный период
+                        # (создана или изменена в период)
+                        created_str = task.get('CREATED_DATE') or task.get('createdDate')
+                        changed_str = task.get('CHANGED_DATE') or task.get('changedDate') or task.get('CLOSED_DATE') or task.get('closedDate')
+                        
+                        task_in_period = False
+                        if created_str and created_str >= from_date_iso:
+                            task_in_period = True
+                        elif changed_str and changed_str >= from_date_iso:
+                            task_in_period = True
+                        
+                        # Если задача связана со сделкой и была активна в период, добавляем её
+                        if task_in_period:
+                            deal_tasks_dict[deal_id].append(task)
+                            break  # Задача может быть связана с несколькими сделками, но считаем один раз
+        
+        # Обновляем результаты для задач (добавляем к уже подсчитанным из активностей CRM)
+        for deal_id, deal_tasks in deal_tasks_dict.items():
+            result[deal_id]['activities']['tasks'] += len(deal_tasks)
+            
+            # Обновляем последнюю активность (используем максимальную дату из создания, изменения или закрытия)
+            for task in deal_tasks:
+                created_str = task.get('CREATED_DATE') or task.get('createdDate')
+                changed_str = task.get('CHANGED_DATE') or task.get('changedDate')
+                closed_str = task.get('CLOSED_DATE') or task.get('closedDate')
+                
+                # Берем самую позднюю дату из всех доступных
+                task_dates = []
+                for date_str in [created_str, changed_str, closed_str]:
+                    if date_str:
+                        try:
+                            task_date = _parse_datetime_from_bitrix(date_str)
+                            task_dates.append(task_date)
+                        except Exception:
+                            pass
+                
+                if task_dates:
+                    max_task_date = max(task_dates)
+                    if result[deal_id]['last_activity_date'] is None or max_task_date > result[deal_id]['last_activity_date']:
+                        result[deal_id]['last_activity_date'] = max_task_date
+        
+        # Вычисляем has_activity для каждой сделки
+        # Учитываем все виды активности: дела (activities), комментарии, задачи
+        deals_with_activities = 0
+        deals_without_activities = 0
+        for deal_id in deal_ids_normalized:
+            total_activities = (
+                result[deal_id]['activities'].get('deals', 0) + 
+                result[deal_id]['activities']['comments'] + 
+                result[deal_id]['activities']['tasks']
+            )
+            result[deal_id]['has_activity'] = total_activities > 0
+            
+            if total_activities > 0:
+                deals_with_activities += 1
+            else:
+                deals_without_activities += 1
+            
+            # Логируем для сделок с нулевой активностью
+            # if result[deal_id]['activities'].get('deals', 0) == 0:
+                # logger.debug(
+                #     f"Сделка {deal_id}: deals=0, calls={result[deal_id]['activities']['calls']}, "
+                #     f"comments={result[deal_id]['activities']['comments']}, "
+                #     f"tasks={result[deal_id]['activities']['tasks']}"
+                # )
+        
+        logger.info(
+            f"Получена активность для {len(deal_ids_normalized)} сделок батчами: "
+            f"с активностью: {deals_with_activities}, без активности: {deals_without_activities}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении активности для сделок батчами: {e}")
+    
+    return result
+
+
 @mcp.tool()
-async def get_deals_at_risk(filter_fields: dict[str, str] = {}, fields_id: list[str] = ["ID", "TITLE", "STAGE_ID", "DATE_MODIFY"]) -> str:
+async def get_deals_at_risk(filter_fields: dict[str, str] = None, fields_id: list[str] = None, include_comments: bool = True, exclude_funnel_keyword: str = None) -> str:
     """Получение сделок, находящихся в риске
     
     Сделка считается «в риске», если выполняется одно или несколько условий:
@@ -588,18 +936,56 @@ async def get_deals_at_risk(filter_fields: dict[str, str] = {}, fields_id: list[
     • отсутствует активность (звонки, комментарии, задачи) более 3 дней;
     
     Args:
-        filter_fields: Дополнительные фильтры для сделок (например, {"CLOSED": "N"})
-        fields_id: Список полей для получения информации о сделках
+        filter_fields: Дополнительные фильтры для сделок (по умолчанию {'STAGE_SEMANTIC_ID': 'P'} - только сделки в работе)
+        fields_id: Список полей для получения информации о сделках (по умолчанию ["ID", "TITLE", "STAGE_ID", "DATE_MODIFY"])
+        include_comments: Получать комментарии для всех сделок (по умолчанию True). Если False, комментарии пропускаются для ускорения работы
+        exclude_funnel_keyword: Ключевое слово для исключения воронок. Если указано, все воронки, в названии которых содержится это слово (без учета регистра), будут исключены из анализа. Сделки из этих воронок не будут проверяться
     
     Returns:
         Текстовая строка со списком сделок в риске с указанием причин
     """
     try:
+        # Устанавливаем значения по умолчанию (создаем новые объекты, чтобы избежать проблем с изменяемыми значениями по умолчанию)
+        if filter_fields is None:
+            filter_fields = {'STAGE_SEMANTIC_ID': 'P'}
+        else:
+            # Создаем копию, чтобы не изменять оригинальный словарь
+            filter_fields = dict(filter_fields)
+            # Добавляем дефолтный фильтр, если его нет
+            # if "CLOSED" not in filter_fields:
+            #     filter_fields["CLOSED"] = "N"
+            if "STAGE_SEMANTIC_ID" not in filter_fields:
+                filter_fields["STAGE_SEMANTIC_ID"] = "P"
+        
+        if fields_id is None:
+            fields_id = ["ID", "TITLE", "STAGE_ID", "DATE_MODIFY"]
+        else:
+            # Создаем копию списка
+            fields_id = list(fields_id)
+        
         # Добавляем обязательные поля
-        required_fields = ['ID', 'TITLE', 'STAGE_ID', 'DATE_MODIFY']
+        required_fields = ['ID', 'TITLE', 'STAGE_ID', 'DATE_MODIFY', 'CATEGORY_ID']
         for field in required_fields:
             if field not in fields_id:
                 fields_id.append(field)
+        
+        # Если указано ключевое слово для исключения воронок, получаем список воронок для фильтрации
+        excluded_category_ids = set()
+        if exclude_funnel_keyword:
+            logger.info(f"Поиск воронок для исключения по ключевому слову: '{exclude_funnel_keyword}'")
+            categories = await get_deal_categories()
+            keyword_lower = exclude_funnel_keyword.lower()
+            for category in categories:
+                category_name = category.get('NAME', '')
+                category_id = category.get('ID')
+                if category_id and keyword_lower in category_name.lower():
+                    excluded_category_ids.add(str(category_id))
+                    logger.info(f"Воронка исключена: '{category_name}' (ID: {category_id})")
+            
+            if excluded_category_ids:
+                logger.info(f"Исключено воронок: {len(excluded_category_ids)} (ID: {', '.join(excluded_category_ids)})")
+            else:
+                logger.info(f"Воронки с ключевым словом '{exclude_funnel_keyword}' не найдены")
         
         # Получаем все сделки по фильтру
         deals = await get_deals_by_filter(filter_fields, fields_id)
@@ -611,21 +997,56 @@ async def get_deals_at_risk(filter_fields: dict[str, str] = {}, fields_id: list[
         if not isinstance(deals, list):
             deals = []
         
+        # Фильтруем сделки по исключаемым воронкам, если указано ключевое слово
+        if exclude_funnel_keyword and excluded_category_ids:
+            original_count = len(deals)
+            deals = [
+                deal for deal in deals
+                if str(deal.get('CATEGORY_ID', '')) not in excluded_category_ids
+            ]
+            filtered_count = original_count - len(deals)
+            if filtered_count > 0:
+                logger.info(f"Отфильтровано сделок из исключенных воронок: {filtered_count} из {original_count}")
+        
         if not deals:
             return "Сделки по указанным фильтрам не найдены."
         
-        # Получаем названия стадий
+        # Получаем названия стадий и воронок
         stages_info = await get_stages("DEAL_STAGE")
         stages_dict = {}
-        for category_data in stages_info.values():
+        categories_dict = {}  # Словарь для быстрого поиска названия воронки по ID
+        for category_id, category_data in stages_info.items():
+            # Сохраняем название воронки
+            categories_dict[str(category_id)] = category_data.get('name', f'Воронка {category_id}')
+            # Сохраняем стадии
             stages_dict.update(category_data.get('stages', {}))
         
         deals_at_risk = []
         now = datetime.now(timezone.utc)
         
-        # Проверяем каждую сделку
+        # Получаем ID всех сделок и нормализуем их
+        deal_ids = []
+        deal_id_to_deal = {}  # Маппинг для восстановления данных сделки
         for deal in deals:
             deal_id = deal.get('ID')
+            if deal_id:
+                try:
+                    deal_id_int = int(deal_id)
+                    deal_ids.append(deal_id_int)
+                    deal_id_to_deal[deal_id_int] = deal
+                except (ValueError, TypeError):
+                    pass
+        
+        # Получаем активность для всех сделок батчами (оптимизация)
+        logger.info(f"Получение активности для {len(deal_ids)} сделок батчами (включая комментарии: {include_comments})")
+        all_activities = await _get_all_deals_activity_batch(deal_ids, days=3, include_comments=include_comments)
+        
+        # Проверяем каждую сделку
+        for deal_id_int, deal in deal_id_to_deal.items():
+            deal_id = deal.get('ID')
+            if not deal_id:
+                continue
+                
             deal_title = deal.get('TITLE', f'Сделка #{deal_id}')
             risk_reasons = []
             
@@ -642,7 +1063,23 @@ async def get_deals_at_risk(filter_fields: dict[str, str] = {}, fields_id: list[
                     logger.warning(f"Ошибка при проверке даты изменения сделки {deal_id}: {e}")
             
             # Проверка 2: Отсутствует активность более 3 дней
-            activity_info = await _get_deal_activity(deal_id, days=3)
+            # Используем нормализованный ID для получения активности
+            activity_info = all_activities.get(deal_id_int, {
+                'has_activity': False,
+                'last_activity_date': None,
+                'activities': {'deals': 0, 'calls': 0, 'comments': 0, 'tasks': 0}
+            })
+            
+            # Логируем информацию об активности для отладки
+            # logger.debug(
+            #     f"Сделка {deal_id_int} (ID из сделки: {deal_id}): "
+            #     f"активность найдена в all_activities: {deal_id_int in all_activities}, "
+            #     f"deals: {activity_info.get('activities', {}).get('deals', 0)}, "
+            #     f"calls: {activity_info.get('activities', {}).get('calls', 0)}, "
+            #     f"comments: {activity_info.get('activities', {}).get('comments', 0)}, "
+            #     f"tasks: {activity_info.get('activities', {}).get('tasks', 0)}"
+            # )
+            
             if not activity_info['has_activity']:
                 risk_reasons.append("Отсутствует активность (звонки, комментарии, задачи) более 3 дней")
             elif activity_info['last_activity_date']:
@@ -658,11 +1095,17 @@ async def get_deals_at_risk(filter_fields: dict[str, str] = {}, fields_id: list[
                 stage_id = deal.get('STAGE_ID', 'Неизвестно')
                 stage_name = stages_dict.get(stage_id, stage_id)
                 
+                # Получаем название воронки
+                category_id = str(deal.get('CATEGORY_ID', '0') or '0')
+                funnel_name = categories_dict.get(category_id, f'Воронка {category_id}')
+                
                 deals_at_risk.append({
                     'deal_id': deal_id,
                     'title': deal_title,
                     'stage': stage_name,
                     'stage_id': stage_id,
+                    'funnel': funnel_name,
+                    'funnel_id': category_id,
                     'reasons': risk_reasons,
                     'activity_info': activity_info
                 })
@@ -677,17 +1120,35 @@ async def get_deals_at_risk(filter_fields: dict[str, str] = {}, fields_id: list[
         
         for idx, deal_info in enumerate(deals_at_risk, 1):
             result_text += f"{idx}. {deal_info['title']} (ID: {deal_info['deal_id']})\n"
+            result_text += f"   Воронка: {deal_info['funnel']}\n"
             result_text += f"   Стадия: {deal_info['stage']} ({deal_info['stage_id']})\n"
             result_text += f"   Причины риска:\n"
             for reason in deal_info['reasons']:
                 result_text += f"     • {reason}\n"
             
             # Добавляем информацию об активности
-            activity = deal_info['activity_info']['activities']
+            activity_info_data = deal_info.get('activity_info', {})
+            activity = activity_info_data.get('activities', {})
+            
+            # Логируем для отладки
+            # logger.debug(
+            #     f"Вывод результата для сделки {deal_info['deal_id']}: "
+            #     f"activity_info keys: {list(activity_info_data.keys())}, "
+            #     f"activities keys: {list(activity.keys()) if isinstance(activity, dict) else 'not a dict'}, "
+            #     f"deals value: {activity.get('deals', 'NOT_FOUND')}"
+            # )
+            
+            # Безопасное получение значений с проверкой
+            deals_count = activity.get('deals', 0) if isinstance(activity, dict) else 0
+            calls_count = activity.get('calls', 0) if isinstance(activity, dict) else 0
+            comments_count = activity.get('comments', 0) if isinstance(activity, dict) else 0
+            tasks_count = activity.get('tasks', 0) if isinstance(activity, dict) else 0
+            
             result_text += f"   Активность за последние 3 дня:\n"
-            result_text += f"     • Звонки: {activity['calls']}\n"
-            result_text += f"     • Комментарии: {activity['comments']}\n"
-            result_text += f"     • Задачи: {activity['tasks']}\n"
+            result_text += f"     • Дела в таймлайне: {deals_count} (встречи, звонки, письма, действия и т.д.)\n"
+            result_text += f"     • Звонки: {calls_count}\n"
+            result_text += f"     • Комментарии: {comments_count}\n"
+            result_text += f"     • Задачи: {tasks_count}\n"
             
             if deal_info['activity_info']['last_activity_date']:
                 result_text += f"   Последняя активность: {deal_info['activity_info']['last_activity_date'].strftime('%Y-%m-%d %H:%M:%S')}\n"

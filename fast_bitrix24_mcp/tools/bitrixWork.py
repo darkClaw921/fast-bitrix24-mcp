@@ -379,29 +379,43 @@ async def get_all_deal_stages_by_categories(entity_id: str = "DEAL_STAGE") -> li
                 unique_key = f"{stage_id}_{category_id}"
                 seen_stage_keys.add(unique_key)
         
-        # Получаем стадии для каждой воронки отдельно
-        for category in categories:
+        # Получаем стадии для всех воронок параллельно (оптимизация)
+        import asyncio
+        
+        async def get_stages_for_category(category: dict) -> list[dict]:
+            """Получает стадии для одной воронки"""
             category_id = category.get('ID')
-            if category_id:
-                try:
-                    category_id_int = int(category_id)
-                    category_stages = await get_category_stages(category_id_int)
-                    
-                    # Добавляем стадии этой воронки
-                    for stage in category_stages:
-                        stage_id = stage.get('STATUS_ID') or stage.get('ID')
-                        if stage_id:
-                            # Убеждаемся, что у стадии есть CATEGORY_ID
-                            if 'CATEGORY_ID' not in stage or stage.get('CATEGORY_ID') is None:
-                                stage['CATEGORY_ID'] = str(category_id)
-                            
-                            unique_key = f"{stage_id}_{stage.get('CATEGORY_ID', '')}"
-                            if unique_key not in seen_stage_keys:
-                                all_stages.append(stage)
-                                seen_stage_keys.add(unique_key)
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Не удалось получить стадии для воронки {category_id}: {e}")
-                    continue
+            if not category_id:
+                return []
+            
+            try:
+                category_id_int = int(category_id)
+                category_stages = await get_category_stages(category_id_int)
+                
+                # Добавляем CATEGORY_ID к каждой стадии, если его нет
+                for stage in category_stages:
+                    if 'CATEGORY_ID' not in stage or stage.get('CATEGORY_ID') is None:
+                        stage['CATEGORY_ID'] = str(category_id)
+                
+                return category_stages
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Не удалось получить стадии для воронки {category_id}: {e}")
+                return []
+        
+        # Выполняем все запросы параллельно
+        logger.info(f"Получение стадий для {len(categories)} воронок параллельно")
+        stages_tasks = [get_stages_for_category(category) for category in categories]
+        all_category_stages_list = await asyncio.gather(*stages_tasks)
+        
+        # Обрабатываем результаты параллельных запросов
+        for category_stages in all_category_stages_list:
+            for stage in category_stages:
+                stage_id = stage.get('STATUS_ID') or stage.get('ID')
+                if stage_id:
+                    unique_key = f"{stage_id}_{stage.get('CATEGORY_ID', '')}"
+                    if unique_key not in seen_stage_keys:
+                        all_stages.append(stage)
+                        seen_stage_keys.add(unique_key)
         
         logger.info(f"Получено всего {len(all_stages)} уникальных стадий для сущности {entity_id} из всех воронок")
         return all_stages
@@ -923,6 +937,154 @@ async def get_crm_activities_by_filter(filter_fields: dict={}, select_fields: li
         return activities
     except Exception as e:
         logger.error(f"Ошибка при получении активностей CRM: {e}")
+        raise
+
+
+async def get_deal_activities_by_type(deal_id: int | str, from_date: str = None, to_date: str = None) -> dict:
+    """Получение всех активностей сделки по всем типам с группировкой
+    
+    Args:
+        deal_id: ID сделки
+        from_date: Начальная дата фильтрации (формат: 'YYYY-MM-DD' или 'YYYY-MM-DDTHH:MM:SS')
+        to_date: Конечная дата фильтрации (формат: 'YYYY-MM-DD' или 'YYYY-MM-DDTHH:MM:SS')
+    
+    Returns:
+        Словарь со структурой:
+        {
+            'deal_id': int,
+            'total_activities': int,
+            'by_type': {
+                'meetings': list[dict],      # TYPE_ID = 1: Встречи
+                'calls': list[dict],         # TYPE_ID = 2: Звонки
+                'tasks': list[dict],         # TYPE_ID = 3: Задачи
+                'emails': list[dict],        # TYPE_ID = 4: Письма
+                'actions': list[dict],       # TYPE_ID = 5: Действия
+                'custom': list[dict]         # TYPE_ID = 6: Пользовательские действия
+            },
+            'statistics': {
+                'meetings': int,
+                'calls': int,
+                'calls_incoming': int,
+                'calls_outgoing': int,
+                'calls_missed': int,
+                'tasks': int,
+                'emails': int,
+                'actions': int,
+                'custom': int
+            },
+            'all_activities': list[dict]     # Все активности в одном списке
+        }
+    """
+    try:
+        deal_id_int = int(deal_id)
+        logger.info(f"Получение всех активностей для сделки {deal_id_int}")
+        
+        # Формируем фильтр
+        filter_fields = {
+            'ENTITY_TYPE': 'DEAL',
+            'ENTITY_ID': deal_id_int
+        }
+        
+        # Добавляем фильтры по дате, если указаны
+        if from_date:
+            if 'T' not in from_date:
+                from_date = f"{from_date}T00:00:00"
+            filter_fields['>=CREATED'] = from_date
+        
+        if to_date:
+            if 'T' not in to_date:
+                to_date = f"{to_date}T23:59:59"
+            filter_fields['<=CREATED'] = to_date
+        
+        # Получаем все активности
+        activities = await get_crm_activities_by_filter(
+            filter_fields=filter_fields,
+            select_fields=['*']
+        )
+        
+        # Группируем по типам
+        by_type = {
+            'meetings': [],      # TYPE_ID = 1
+            'calls': [],         # TYPE_ID = 2
+            'tasks': [],         # TYPE_ID = 3
+            'emails': [],        # TYPE_ID = 4
+            'actions': [],       # TYPE_ID = 5
+            'custom': []         # TYPE_ID = 6
+        }
+        
+        statistics = {
+            'meetings': 0,
+            'calls': 0,
+            'calls_incoming': 0,
+            'calls_outgoing': 0,
+            'calls_missed': 0,
+            'tasks': 0,
+            'emails': 0,
+            'actions': 0,
+            'custom': 0
+        }
+        
+        # Обрабатываем каждую активность
+        for activity in activities:
+            type_id = str(activity.get('TYPE_ID', ''))
+            provider_id = activity.get('PROVIDER_ID')
+            provider_type_id = activity.get('PROVIDER_TYPE_ID')
+            
+            # Проверяем, является ли это задачей CRM_TODO (может быть TYPE_ID='6' или TYPE_ID='3')
+            is_crm_todo = provider_id == 'CRM_TODO' and provider_type_id == 'TODO'
+            
+            if type_id == '1':  # Встреча
+                by_type['meetings'].append(activity)
+                statistics['meetings'] += 1
+            elif type_id == '2':  # Звонок
+                by_type['calls'].append(activity)
+                statistics['calls'] += 1
+                direction = str(activity.get('DIRECTION', ''))
+                if direction == '1':
+                    statistics['calls_outgoing'] += 1
+                elif direction == '2':
+                    statistics['calls_incoming'] += 1
+                elif direction == '0':
+                    statistics['calls_missed'] += 1
+            elif type_id == '3':  # Задача
+                by_type['tasks'].append(activity)
+                statistics['tasks'] += 1
+            elif type_id == '4':  # Письмо
+                by_type['emails'].append(activity)
+                statistics['emails'] += 1
+            elif type_id == '5':  # Действие
+                by_type['actions'].append(activity)
+                statistics['actions'] += 1
+            elif type_id == '6':  # Пользовательское действие
+                # Проверяем, является ли это задачей CRM_TODO
+                if is_crm_todo:
+                    # Относим к задачам
+                    by_type['tasks'].append(activity)
+                    statistics['tasks'] += 1
+                else:
+                    # Обычное пользовательское действие
+                    by_type['custom'].append(activity)
+                    statistics['custom'] += 1
+        
+        total_activities = len(activities)
+        
+        logger.info(
+            f"Получено активностей для сделки {deal_id_int}: всего {total_activities} "
+            f"(встречи: {statistics['meetings']}, звонки: {statistics['calls']}, "
+            f"задачи: {statistics['tasks']}, письма: {statistics['emails']}, "
+            f"действия: {statistics['actions']}, пользовательские: {statistics['custom']})"
+        )
+        
+        return {
+            'deal_id': deal_id_int,
+            'total_activities': total_activities,
+            'by_type': by_type,
+            'statistics': statistics,
+            'all_activities': activities
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении активностей для сделки {deal_id}: {e}")
         raise
 
 
@@ -1704,7 +1866,9 @@ if __name__ == "__main__":
     # a=asyncio.run(get_manager_full_activity(9, 30))
     # a=asyncio.run(get_all_managers_activity(30, only_inactive=True))
     # a=asyncio.run(get_all_deal_stages_by_categories())
-    a=asyncio.run(get_stage_history(2, filter_fields={'>=CREATED_TIME': '2025-11-01T00:00:00', '<=CREATED_TIME': '2025-11-12T23:59:59'}))
+    # a=asyncio.run(get_stage_history(2, filter_fields={'>=CREATED_TIME': '2025-11-01T00:00:00', '<=CREATED_TIME': '2025-11-12T23:59:59'}))
+    # pprint(a)
+    a=asyncio.run(get_deal_activities_by_type(20))
     pprint(a)
 
 

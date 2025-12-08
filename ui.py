@@ -9,6 +9,7 @@ from loguru import logger
 import json
 import asyncio
 import inspect
+import time
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 load_dotenv()
@@ -318,6 +319,19 @@ async def root():
                 background: #fcc;
                 color: #600;
             }
+            .execution-time {
+                margin-top: 10px;
+                padding: 8px 12px;
+                background: #e3e8ff;
+                border-left: 4px solid #667eea;
+                border-radius: 4px;
+                font-size: 0.9em;
+                color: #333;
+                font-weight: 500;
+            }
+            .execution-time strong {
+                color: #667eea;
+            }
         </style>
     </head>
     <body>
@@ -346,6 +360,7 @@ async def root():
                 <div class="result-section">
                     <h2 class="section-title">Результат выполнения</h2>
                     <div class="loading" id="loading">⏳ Выполнение запроса...</div>
+                    <div class="execution-time" id="executionTime" style="display: none;"></div>
                     <div class="result-box" id="resultBox" style="display: none;">
                         <pre id="resultContent"></pre>
                     </div>
@@ -639,14 +654,18 @@ async def root():
                 const loading = document.getElementById('loading');
                 const resultBox = document.getElementById('resultBox');
                 const resultContent = document.getElementById('resultContent');
+                const executionTime = document.getElementById('executionTime');
                 
-                if (!loading || !resultBox || !resultContent) {
+                if (!loading || !resultBox || !resultContent || !executionTime) {
                     console.error('Не найдены элементы для отображения результата');
                     return;
                 }
                 
                 loading.classList.add('active');
                 resultBox.style.display = 'none';
+                executionTime.style.display = 'none';
+                
+                const startTime = performance.now();
                 
                 // Сбор параметров
                 const arguments_ = {};
@@ -701,6 +720,18 @@ async def root():
                     
                     loading.classList.remove('active');
                     
+                    // Отображение времени выполнения
+                    const endTime = performance.now();
+                    const clientTime = ((endTime - startTime) / 1000).toFixed(3);
+                    const serverTime = data.execution_time ? data.execution_time.toFixed(3) : null;
+                    
+                    if (serverTime) {
+                        executionTime.innerHTML = `<strong>⏱ Время выполнения:</strong> ${serverTime} сек (сервер) / ${clientTime} сек (клиент)`;
+                    } else {
+                        executionTime.innerHTML = `<strong>⏱ Время выполнения:</strong> ${clientTime} сек (клиент)`;
+                    }
+                    executionTime.style.display = 'block';
+                    
                     if (!response.ok) {
                         // Обработка ошибок HTTP
                         const errorMsg = data.detail || data.error || `HTTP error! status: ${response.status}`;
@@ -719,6 +750,10 @@ async def root():
                 } catch (error) {
                     console.error('Ошибка вызова tool:', error);
                     loading.classList.remove('active');
+                    const endTime = performance.now();
+                    const clientTime = ((endTime - startTime) / 1000).toFixed(3);
+                    executionTime.innerHTML = `<strong>⏱ Время до ошибки:</strong> ${clientTime} сек`;
+                    executionTime.style.display = 'block';
                     resultBox.className = 'result-box error';
                     resultContent.textContent = `Ошибка запроса: ${error.message}`;
                     resultBox.style.display = 'block';
@@ -728,8 +763,10 @@ async def root():
             function clearResult() {
                 const resultBox = document.getElementById('resultBox');
                 const resultContent = document.getElementById('resultContent');
+                const executionTime = document.getElementById('executionTime');
                 if (resultBox) resultBox.style.display = 'none';
                 if (resultContent) resultContent.textContent = '';
+                if (executionTime) executionTime.style.display = 'none';
             }
 
             // Инициализация при загрузке страницы
@@ -857,6 +894,9 @@ async def call_tool(tool_name: str, http_request: Request):
         
         logger.info(f"Вызов tool '{tool_name}' с аргументами: {arguments}")
         
+        # Начало измерения времени выполнения
+        start_time = time.perf_counter()
+        
         client = await get_mcp_client()
         tools = await client.get_tools()
         
@@ -978,18 +1018,22 @@ async def call_tool(tool_name: str, http_request: Request):
             logger.error(f"Ошибка выполнения tool '{tool_name}': {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Ошибка выполнения tool: {str(e)}")
         
-        logger.info(f"Tool '{tool_name}' выполнен успешно")
+        # Конец измерения времени выполнения
+        end_time = time.perf_counter()
+        execution_time = end_time - start_time
+        
+        logger.info(f"Tool '{tool_name}' выполнен успешно за {execution_time:.3f} сек")
         
         # Преобразование результата в строку, если это не строка
         if isinstance(result, (dict, list)):
             # Если результат - словарь или список, возвращаем как есть
-            return {"result": result}
+            return {"result": result, "execution_time": execution_time}
         elif hasattr(result, 'content'):
             # Если результат имеет атрибут content (например, из langchain)
-            return {"result": result.content if hasattr(result.content, '__str__') else str(result.content)}
+            return {"result": result.content if hasattr(result.content, '__str__') else str(result.content), "execution_time": execution_time}
         else:
             # Преобразуем в строку
-            return {"result": str(result)}
+            return {"result": str(result), "execution_time": execution_time}
     except HTTPException:
         raise
     except Exception as e:
