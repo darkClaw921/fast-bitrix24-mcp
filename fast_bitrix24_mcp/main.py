@@ -10,6 +10,12 @@ from .tools.contact import mcp as contact_mcp
 from .tools.task import mcp as task_mcp
 from .tools.helper import mcp as helper_mcp
 from .tools.lead import mcp as lead_mcp
+from .tools.activity_decline import mcp as activity_decline_mcp
+from .tools.daily_summary import mcp as daily_summary_mcp
+from .tools.sales_funnel import mcp as sales_funnel_mcp
+from .tools.top_clients import mcp as top_clients_mcp
+from .tools.inactive_clients import mcp as inactive_clients_mcp
+from .tools.manager_support import mcp as manager_support_mcp
 from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
 from datetime import datetime
 import os
@@ -60,6 +66,12 @@ mcp.mount(prefix="contact", server=contact_mcp, as_proxy=True)
 mcp.mount(prefix="task", server=task_mcp, as_proxy=True)
 mcp.mount(prefix="helper", server=helper_mcp, as_proxy=True)
 mcp.mount(prefix="lead", server=lead_mcp, as_proxy=True)
+mcp.mount(prefix="activity_decline", server=activity_decline_mcp, as_proxy=True)
+mcp.mount(prefix="daily_summary", server=daily_summary_mcp, as_proxy=True)
+mcp.mount(prefix="sales_funnel", server=sales_funnel_mcp, as_proxy=True)
+mcp.mount(prefix="top_clients", server=top_clients_mcp, as_proxy=True)
+mcp.mount(prefix="inactive_clients", server=inactive_clients_mcp, as_proxy=True)
+mcp.mount(prefix="manager_support", server=manager_support_mcp, as_proxy=True)
 
 @mcp.prompt(description="главный промт для взаимодействия с сервером который нужно использовать каждый раз при взаимодействии с сервером")
 def main_prompt() -> str:

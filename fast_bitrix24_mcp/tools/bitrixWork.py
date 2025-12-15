@@ -11,6 +11,7 @@ import json
 import hashlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from collections import defaultdict
 
 # Настройка уровня логирования для библиотеки fast_bitrix24 - отключаем DEBUG логи
 logging.getLogger('fast_bitrix24').setLevel(logging.WARNING)
@@ -1287,7 +1288,15 @@ async def get_calendar_events(from_date: str, to_date: str, owner_id: int = None
 
 
 async def get_manager_full_activity(manager_id: int, days: int = 30) -> dict:
-    """Получение полной активности менеджера за указанный период с кэшированием"""
+    """Получение полной активности менеджера за указанный период с кэшированием
+    
+    Оптимизированная версия:
+    - Использует параллельное выполнение всех независимых запросов через asyncio.gather:
+      активности CRM, задачи, сделки, лиды, события календаря и комментарии выполняются одновременно
+    - Использует батчинг для получения комментариев через get_all_comments_batch()
+      вместо 4 отдельных запросов для каждого типа сущности (deal, lead, contact, company)
+    Это значительно ускоряет работу функции по сравнению с последовательным выполнением запросов.
+    """
     try:
         logger.info(f"Получение активности менеджера {manager_id} за {days} дней")
         
@@ -1317,13 +1326,49 @@ async def get_manager_full_activity(manager_id: int, days: int = 30) -> dict:
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         
-        # Получение активностей CRM
+        # Подготовка фильтров для всех запросов
         date_filter = {
             '>=CREATED': f"{start_date}T00:00:00",
             '<=CREATED': f"{end_date}T23:59:59",
             'RESPONSIBLE_ID': manager_id
         }
-        activities = await get_crm_activities_by_filter(date_filter)
+        tasks_filter = {
+            'RESPONSIBLE_ID': manager_id,
+            '>=CREATED_DATE': f"{start_date}T00:00:00",
+            '<=CREATED_DATE': f"{end_date}T23:59:59"
+        }
+        deals_filter = {
+            '>=DATE_CREATE': f"{start_date}T00:00:00",
+            '<=DATE_CREATE': f"{end_date}T23:59:59",
+            'ASSIGNED_BY_ID': manager_id
+        }
+        leads_filter = {
+            '>=DATE_CREATE': f"{start_date}T00:00:00",
+            '<=DATE_CREATE': f"{end_date}T23:59:59",
+            'ASSIGNED_BY_ID': manager_id
+        }
+        date_filter_for_comments = {
+            '>=DATE_CREATE': f"{start_date}T00:00:00",
+            '<=DATE_CREATE': f"{end_date}T23:59:59"
+        }
+        
+        # Выполняем все независимые запросы параллельно для ускорения
+        logger.info(f"Параллельное получение всех данных для менеджера {manager_id}")
+        activities, tasks, deals, leads, calendar_events, all_comments_by_manager = await asyncio.gather(
+            get_crm_activities_by_filter(date_filter),
+            get_tasks_by_filter(
+                tasks_filter,
+                select_fields=['ID', 'TITLE', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'RESPONSIBLE_ID']
+            ),
+            get_deals_by_filter(deals_filter, select_fields=['ID', 'TITLE', 'STAGE_ID', 'DATE_CREATE']),
+            get_leads_by_filter(leads_filter, select_fields=['ID', 'TITLE', 'STATUS_ID', 'DATE_CREATE']),
+            get_calendar_events(
+                from_date=f"{start_date}T00:00:00",
+                to_date=f"{end_date}T23:59:59",
+                owner_id=manager_id
+            ),
+            get_all_comments_batch(date_filter_for_comments, [manager_id])
+        )
         
         # Анализ типов активностей
         calls_total = 0
@@ -1349,17 +1394,6 @@ async def get_manager_full_activity(manager_id: int, days: int = 30) -> dict:
             elif type_id == '4':  # Email
                 emails += 1
         
-        # Получение задач с фильтрацией по ответственному и дате создания
-        tasks_filter = {
-            'RESPONSIBLE_ID': manager_id,
-            '>=CREATED_DATE': f"{start_date}T00:00:00",
-            '<=CREATED_DATE': f"{end_date}T23:59:59"
-        }
-        tasks = await get_tasks_by_filter(
-            tasks_filter,
-            select_fields=['ID', 'TITLE', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'RESPONSIBLE_ID']
-        )
-        
         # Дополнительная проверка на клиенте для убедительности, что задачи принадлежат менеджеру
         tasks = [
             t for t in tasks 
@@ -1371,52 +1405,36 @@ async def get_manager_full_activity(manager_id: int, days: int = 30) -> dict:
         tasks_completed = len([t for t in tasks if str(t.get('STATUS', t.get('status', ''))) == '5'])
         tasks_in_progress = len([t for t in tasks if str(t.get('STATUS', t.get('status', ''))) in ['2', '3']])
         
-        # Получение сделок
-        deals_filter = {
-            '>=DATE_CREATE': f"{start_date}T00:00:00",
-            '<=DATE_CREATE': f"{end_date}T23:59:59",
-            'ASSIGNED_BY_ID': manager_id
-        }
-        deals = await get_deals_by_filter(deals_filter, select_fields=['ID', 'TITLE', 'STAGE_ID', 'DATE_CREATE'])
+        # Нормализация сделок
         if isinstance(deals, dict):
             if deals.get('order0000000000'):
                 deals = deals['order0000000000']
         deals = deals if isinstance(deals, list) else []
         deals_won = len([d for d in deals if 'WON' in str(d.get('STAGE_ID', '')).upper()])
         
-        # Получение лидов
-        leads_filter = {
-            '>=DATE_CREATE': f"{start_date}T00:00:00",
-            '<=DATE_CREATE': f"{end_date}T23:59:59",
-            'ASSIGNED_BY_ID': manager_id
-        }
-        leads = await get_leads_by_filter(leads_filter, select_fields=['ID', 'TITLE', 'STATUS_ID', 'DATE_CREATE'])
+        # Нормализация лидов
         if isinstance(leads, dict):
             if leads.get('order0000000000'):
                 leads = leads['order0000000000']
         leads = leads if isinstance(leads, list) else []
         leads_converted = len([l for l in leads if str(l.get('STATUS_ID', '')) == 'CONVERTED'])
         
-        # Получение событий календаря
-        calendar_events = await get_calendar_events(
-            from_date=f"{start_date}T00:00:00",
-            to_date=f"{end_date}T23:59:59",
-            owner_id=manager_id
-        )
         calendar_meetings = len([
             e for e in calendar_events 
             if e.get('CAL_TYPE') == 'user' or e.get('MEETING_STATUS') == 'Y'
         ])
         
-        # Получение комментариев с фильтрацией по дате для оптимизации
-        date_filter_for_comments = {
-            '>=DATE_CREATE': f"{start_date}T00:00:00",
-            '<=DATE_CREATE': f"{end_date}T23:59:59"
-        }
-        deal_comments = await get_all_entity_comments('deal', manager_id, from_date=None, date_filter=date_filter_for_comments)
-        lead_comments = await get_all_entity_comments('lead', manager_id, from_date=None, date_filter=date_filter_for_comments)
-        contact_comments = await get_all_entity_comments('contact', manager_id, from_date=None, date_filter=date_filter_for_comments)
-        company_comments = await get_all_entity_comments('company', manager_id, from_date=None, date_filter=date_filter_for_comments)
+        # Извлекаем комментарии для каждого типа сущности
+        manager_comments = all_comments_by_manager.get(manager_id, {
+            'deal': [],
+            'lead': [],
+            'contact': [],
+            'company': []
+        })
+        deal_comments = manager_comments.get('deal', [])
+        lead_comments = manager_comments.get('lead', [])
+        contact_comments = manager_comments.get('contact', [])
+        company_comments = manager_comments.get('company', [])
         
         total_comments = len(deal_comments) + len(lead_comments) + len(contact_comments) + len(company_comments)
         
@@ -1495,6 +1513,331 @@ async def get_manager_full_activity(manager_id: int, days: int = 30) -> dict:
         raise
 
 
+async def get_all_comments_batch(date_filter: dict, manager_ids: list[int] = None) -> dict[int, dict]:
+    """Получение всех комментариев для всех типов сущностей батчами с группировкой по менеджерам
+    
+    Оптимизированная версия: получает все комментарии для всех типов сущностей (deal, lead, contact, company)
+    одним набором запросов, затем группирует по AUTHOR_ID на клиенте.
+    Это значительно ускоряет работу при большом количестве менеджеров.
+    
+    Args:
+        date_filter: Фильтр по дате создания комментариев (например, {'>=DATE_CREATE': '2025-01-01T00:00:00', '<=DATE_CREATE': '2025-01-31T23:59:59'})
+        manager_ids: Список ID менеджеров для фильтрации (если None, возвращаются комментарии всех менеджеров)
+    
+    Returns:
+        Словарь {manager_id: {'deal': [...], 'lead': [...], 'contact': [...], 'company': [...]}}
+    """
+    try:
+        logger.info(f"Получение всех комментариев батчами для {len(manager_ids) if manager_ids else 'всех'} менеджеров")
+        
+        result = {}
+        if manager_ids:
+            for manager_id in manager_ids:
+                result[manager_id] = {
+                    'deal': [],
+                    'lead': [],
+                    'contact': [],
+                    'company': []
+                }
+        
+        # Получаем все сущности каждого типа за период
+        entity_types = ['deal', 'lead', 'contact', 'company']
+        
+        for entity_type in entity_types:
+            logger.info(f"Получение комментариев для {entity_type}")
+            
+            # Получаем список сущностей нужного типа с фильтрацией по дате
+            filter_params = date_filter.copy()
+            entity_list = []
+            
+            if entity_type == 'deal':
+                entity_list = await get_deals_by_filter(filter_params, select_fields=['ID'])
+            elif entity_type == 'lead':
+                entity_list = await get_leads_by_filter(filter_params, select_fields=['ID'])
+            elif entity_type == 'contact':
+                entity_list = await get_contacts_by_filter(filter_params, select_fields=['ID'])
+            elif entity_type == 'company':
+                entity_list = await get_companies_by_filter(filter_params, select_fields=['ID'])
+            
+            # Нормализуем entity_list в список
+            if isinstance(entity_list, dict):
+                if entity_list.get('order0000000000'):
+                    entity_list = entity_list['order0000000000']
+                else:
+                    entity_list = []
+            
+            if not isinstance(entity_list, list):
+                entity_list = []
+            
+            if not entity_list:
+                continue
+            
+            logger.info(f"Найдено {len(entity_list)} {entity_type} для получения комментариев")
+            
+            # Формируем список запросов для батчинга
+            batch_requests = []
+            for entity in entity_list:
+                entity_id = entity.get('ID')
+                if not entity_id:
+                    continue
+                
+                params = {
+                    'filter': {
+                        'ENTITY_TYPE': entity_type,
+                        'ENTITY_ID': entity_id
+                    }
+                }
+                batch_requests.append(params)
+            
+            if not batch_requests:
+                continue
+            
+            # Выполняем запросы батчами
+            logger.info(f"Выполнение {len(batch_requests)} запросов комментариев {entity_type} через батчи")
+            results = await bit.call('crm.timeline.comment.list', batch_requests, raw=True)
+            
+            # Обрабатываем результаты батчей и группируем по менеджерам
+            if isinstance(results, list):
+                for result_item in results:
+                    if result_item and 'result' in result_item and isinstance(result_item['result'], list):
+                        for comment in result_item['result']:
+                            author_id = comment.get('AUTHOR_ID')
+                            if not author_id:
+                                continue
+                            
+                            author_id_int = int(author_id)
+                            
+                            # Если указаны manager_ids, фильтруем только их комментарии
+                            if manager_ids and author_id_int not in manager_ids:
+                                continue
+                            
+                            if author_id_int not in result:
+                                result[author_id_int] = {
+                                    'deal': [],
+                                    'lead': [],
+                                    'contact': [],
+                                    'company': []
+                                }
+                            
+                            result[author_id_int][entity_type].append(comment)
+            elif isinstance(results, dict):
+                if 'result' in results and isinstance(results['result'], list):
+                    for comment in results['result']:
+                        author_id = comment.get('AUTHOR_ID')
+                        if not author_id:
+                            continue
+                        
+                        author_id_int = int(author_id)
+                        
+                        if manager_ids and author_id_int not in manager_ids:
+                            continue
+                        
+                        if author_id_int not in result:
+                            result[author_id_int] = {
+                                'deal': [],
+                                'lead': [],
+                                'contact': [],
+                                'company': []
+                            }
+                        
+                        result[author_id_int][entity_type].append(comment)
+        
+        logger.info(f"Получено комментариев для {len(result)} менеджеров")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении всех комментариев батчами: {e}")
+        raise
+
+
+async def get_all_calendar_events_batch(from_date: str, to_date: str, manager_ids: list[int]) -> dict[int, list[dict]]:
+    """Получение всех событий календаря для всех менеджеров параллельно с группировкой по owner_id
+    
+    Оптимизированная версия: получает секции календаря и события для всех менеджеров параллельно
+    через asyncio.gather (API Bitrix24 не поддерживает батчинг для calendar.section.get и calendar.event.get),
+    затем группирует по owner_id на клиенте.
+    Это значительно ускоряет работу при большом количестве менеджеров по сравнению с последовательными запросами.
+    
+    Args:
+        from_date: Начальная дата периода (формат: 'YYYY-MM-DDTHH:MM:SS')
+        to_date: Конечная дата периода (формат: 'YYYY-MM-DDTHH:MM:SS')
+        manager_ids: Список ID менеджеров для получения событий
+    
+    Returns:
+        Словарь {manager_id: [список событий календаря]}
+    """
+    try:
+        logger.info(f"Получение всех событий календаря батчами для {len(manager_ids)} менеджеров")
+        
+        result = {}
+        for manager_id in manager_ids:
+            result[manager_id] = []
+        
+        # Шаг 1: Получаем секции календаря для каждого менеджера отдельно (API не поддерживает батчинг)
+        # Выполняем запросы параллельно через asyncio.gather для ускорения
+        logger.info("Получение секций календаря для всех менеджеров (параллельно)")
+        
+        async def get_sections_for_manager(manager_id: int):
+            """Получение секций календаря для одного менеджера"""
+            try:
+                sections_params = {
+                    'type': 'user',
+                    'ownerId': manager_id
+                }
+                sections_result = await bit.call('calendar.section.get', sections_params, raw=True)
+                
+                sections = []
+                if sections_result and 'result' in sections_result:
+                    sections = sections_result['result'] if isinstance(sections_result['result'], list) else [sections_result['result']]
+                
+                return manager_id, sections
+            except Exception as e:
+                logger.warning(f"Ошибка при получении секций календаря для менеджера {manager_id}: {e}")
+                return manager_id, []
+        
+        # Выполняем все запросы параллельно
+        sections_tasks = [get_sections_for_manager(manager_id) for manager_id in manager_ids]
+        sections_results_list = await asyncio.gather(*sections_tasks)
+        
+        # Собираем все секции с привязкой к менеджерам
+        manager_sections = {}
+        for manager_id, sections in sections_results_list:
+            if sections:
+                manager_sections[manager_id] = sections
+        
+        logger.info(f"Получено секций календаря для {len(manager_sections)} менеджеров")
+        
+        # Шаг 2: Получаем события для всех секций параллельно (API не поддерживает батчинг)
+        # Группируем секции по менеджерам для более эффективных запросов
+        async def get_events_for_manager(manager_id: int, section_ids: list):
+            """Получение событий календаря для одного менеджера со всеми его секциями"""
+            try:
+                events_params = {
+                    'type': 'user',
+                    'ownerId': manager_id,
+                    'section': section_ids,
+                    'from': from_date,
+                    'to': to_date
+                }
+                events_result = await bit.call('calendar.event.get', events_params, raw=True)
+                
+                events = []
+                if events_result and 'result' in events_result:
+                    # Результат может быть словарем или списком
+                    if isinstance(events_result['result'], dict):
+                        # Если результат - словарь, преобразуем в список
+                        events = [events_result['result']]
+                    elif isinstance(events_result['result'], list):
+                        events = events_result['result']
+                
+                return manager_id, events
+            except Exception as e:
+                logger.warning(f"Ошибка при получении событий календаря для менеджера {manager_id}: {e}")
+                return manager_id, []
+        
+        # Формируем задачи для параллельного выполнения
+        events_tasks = []
+        for manager_id, sections in manager_sections.items():
+            section_ids = [s.get('ID') for s in sections if s.get('ID')]
+            if section_ids:
+                events_tasks.append(get_events_for_manager(manager_id, section_ids))
+        
+        if not events_tasks:
+            logger.info("Нет секций календаря для получения событий")
+            return result
+        
+        logger.info(f"Выполнение {len(events_tasks)} запросов событий календаря параллельно")
+        events_results_list = await asyncio.gather(*events_tasks)
+        
+        # Группируем события по менеджерам
+        for manager_id, events in events_results_list:
+            if events:
+                result[manager_id].extend(events)
+        
+        logger.info(f"Получено событий календаря для {len([m for m in result if result[m]])} менеджеров")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении всех событий календаря батчами: {e}")
+        raise
+
+
+def _create_manager_activity_structure(
+    user_id: int,
+    user: dict,
+    manager_name: str,
+    start_date: str,
+    end_date: str,
+    days: int,
+    calls_total: int,
+    calls_incoming: int,
+    calls_outgoing: int,
+    calls_missed: int,
+    meetings: int,
+    emails: int,
+    tasks: list,
+    tasks_completed: int,
+    tasks_in_progress: int,
+    deals: list,
+    deals_won: int,
+    leads: list,
+    leads_converted: int,
+    calendar_events: list,
+    calendar_meetings: int,
+    deal_comments: list,
+    lead_comments: list,
+    contact_comments: list,
+    company_comments: list,
+    total_comments_count: int,
+    total_activities_count: int
+) -> dict:
+    """Создает структуру статистики активности менеджера"""
+    return {
+        'manager_id': user_id,
+        'name': manager_name,
+        'email': user.get('EMAIL', ''),
+        'work_position': user.get('WORK_POSITION', ''),
+        'period': {
+            'start_date': start_date,
+            'end_date': end_date,
+            'days': days
+        },
+        'calls': {
+            'total': calls_total,
+            'incoming': calls_incoming,
+            'outgoing': calls_outgoing,
+            'missed': calls_missed
+        },
+        'meetings': meetings,
+        'emails': emails,
+        'tasks': {
+            'total': len(tasks),
+            'completed': tasks_completed,
+            'in_progress': tasks_in_progress
+        },
+        'deals': {
+            'created': len(deals),
+            'won': deals_won
+        },
+        'leads': {
+            'created': len(leads),
+            'converted': leads_converted
+        },
+        'calendar': {
+            'total_events': len(calendar_events),
+            'meetings': calendar_meetings
+        },
+        'comments': {
+            'total': total_comments_count,
+            'deals': len(deal_comments),
+            'leads': len(lead_comments),
+            'contacts': len(contact_comments),
+            'companies': len(company_comments)
+        },
+        'total_activities': total_activities_count
+    }
+
+
 async def get_all_managers_activity(days: int = 30, include_inactive: bool = True, only_inactive: bool = False) -> dict:
     """Получение активности всех менеджеров за указанный период с определением неактивных пользователей
     
@@ -1541,89 +1884,125 @@ async def get_all_managers_activity(days: int = 30, include_inactive: bool = Tru
         
         logger.info(f"Найдено {len(all_users)} пользователей для анализа активности")
         
-        # Шаг 1: Получаем все сущности за период один раз (оптимизация)
-        logger.info("Получение всех сущностей за период для группировки по менеджерам")
+        # Шаг 1: Получаем все сущности за период параллельно (оптимизация)
+        logger.info("Параллельное получение всех сущностей за период для группировки по менеджерам")
         
-        # Получаем все сделки за период
+        # Подготовка фильтров
         deals_filter = {
             '>=DATE_CREATE': f"{start_date}T00:00:00",
             '<=DATE_CREATE': f"{end_date}T23:59:59"
         }
-        all_deals = await get_deals_by_filter(deals_filter, select_fields=['ID', 'TITLE', 'STAGE_ID', 'DATE_CREATE', 'ASSIGNED_BY_ID'])
-        if isinstance(all_deals, dict):
-            if all_deals.get('order0000000000'):
-                all_deals = all_deals['order0000000000']
-        all_deals = all_deals if isinstance(all_deals, list) else []
-        
-        # Получаем все лиды за период
         leads_filter = {
             '>=DATE_CREATE': f"{start_date}T00:00:00",
             '<=DATE_CREATE': f"{end_date}T23:59:59"
         }
-        all_leads = await get_leads_by_filter(leads_filter, select_fields=['ID', 'TITLE', 'STATUS_ID', 'DATE_CREATE', 'ASSIGNED_BY_ID'])
-        if isinstance(all_leads, dict):
-            if all_leads.get('order0000000000'):
-                all_leads = all_leads['order0000000000']
-        all_leads = all_leads if isinstance(all_leads, list) else []
-        
-        # Получаем все задачи за период
         tasks_filter = {
             '>=CREATED_DATE': f"{start_date}T00:00:00",
             '<=CREATED_DATE': f"{end_date}T23:59:59"
         }
-        all_tasks = await get_tasks_by_filter(
-            tasks_filter,
-            select_fields=['ID', 'TITLE', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'RESPONSIBLE_ID']
-        )
-        
-        # Получаем все активности CRM за период
         activities_filter = {
             '>=CREATED': f"{start_date}T00:00:00",
             '<=CREATED': f"{end_date}T23:59:59"
         }
-        all_activities = await get_crm_activities_by_filter(activities_filter)
+        
+        # Выполняем все запросы параллельно
+        deals_result, leads_result, all_tasks, all_activities = await asyncio.gather(
+            get_deals_by_filter(deals_filter, select_fields=['ID', 'TITLE', 'STAGE_ID', 'DATE_CREATE', 'ASSIGNED_BY_ID']),
+            get_leads_by_filter(leads_filter, select_fields=['ID', 'TITLE', 'STATUS_ID', 'DATE_CREATE', 'ASSIGNED_BY_ID']),
+            get_tasks_by_filter(
+                tasks_filter,
+                select_fields=['ID', 'TITLE', 'STATUS', 'CREATED_DATE', 'CLOSED_DATE', 'RESPONSIBLE_ID']
+            ),
+            get_crm_activities_by_filter(activities_filter)
+        )
+        
+        # Нормализуем результаты
+        if isinstance(deals_result, dict):
+            all_deals = deals_result.get('order0000000000', [])
+        else:
+            all_deals = deals_result if isinstance(deals_result, list) else []
+        
+        if isinstance(leads_result, dict):
+            all_leads = leads_result.get('order0000000000', [])
+        else:
+            all_leads = leads_result if isinstance(leads_result, list) else []
+        
+        all_tasks = all_tasks if isinstance(all_tasks, list) else []
+        all_activities = all_activities if isinstance(all_activities, list) else []
         
         logger.info(f"Получено: {len(all_deals)} сделок, {len(all_leads)} лидов, {len(all_tasks)} задач, {len(all_activities)} активностей CRM")
         
-        # Шаг 2: Группируем сущности по менеджерам
+        # Шаг 2: Получаем все комментарии и события календаря батчами параллельно (оптимизация)
+        manager_ids = [int(u.get('ID', 0)) for u in all_users if u.get('ID')]
+        manager_ids = [mid for mid in manager_ids if mid > 0]
+        
+        date_filter_for_comments = {
+            '>=DATE_CREATE': f"{start_date}T00:00:00",
+            '<=DATE_CREATE': f"{end_date}T23:59:59"
+        }
+        
+        # Получаем комментарии и календарь параллельно
+        logger.info("Параллельное получение всех комментариев и событий календаря батчами для всех менеджеров")
+        all_comments_by_manager, all_calendar_events_by_manager = await asyncio.gather(
+            get_all_comments_batch(date_filter_for_comments, manager_ids),
+            get_all_calendar_events_batch(
+                from_date=f"{start_date}T00:00:00",
+                to_date=f"{end_date}T23:59:59",
+                manager_ids=manager_ids
+            )
+        )
+        
+        # Шаг 3: Группируем сущности по менеджерам (оптимизированная версия)
+        # Создаем словарь пользователей
         managers_data = {}
+        user_id_to_str = {}
         for user in all_users:
             user_id = user.get('ID')
             if not user_id:
                 continue
-            managers_data[str(user_id)] = {
+            user_id_str = str(user_id)
+            managers_data[user_id_str] = {
                 'user': user,
                 'deals': [],
                 'leads': [],
                 'tasks': [],
                 'activities': []
             }
+            user_id_to_str[user_id] = user_id_str
         
-        # Группируем сделки по менеджерам
+        # Группируем сделки по менеджерам (оптимизированная версия)
         for deal in all_deals:
-            assigned_by_id = str(deal.get('ASSIGNED_BY_ID', ''))
-            if assigned_by_id in managers_data:
-                managers_data[assigned_by_id]['deals'].append(deal)
+            assigned_by_id = deal.get('ASSIGNED_BY_ID')
+            if assigned_by_id:
+                user_id_str = user_id_to_str.get(assigned_by_id)
+                if user_id_str:
+                    managers_data[user_id_str]['deals'].append(deal)
         
-        # Группируем лиды по менеджерам
+        # Группируем лиды по менеджерам (оптимизированная версия)
         for lead in all_leads:
-            assigned_by_id = str(lead.get('ASSIGNED_BY_ID', ''))
-            if assigned_by_id in managers_data:
-                managers_data[assigned_by_id]['leads'].append(lead)
+            assigned_by_id = lead.get('ASSIGNED_BY_ID')
+            if assigned_by_id:
+                user_id_str = user_id_to_str.get(assigned_by_id)
+                if user_id_str:
+                    managers_data[user_id_str]['leads'].append(lead)
         
-        # Группируем задачи по менеджерам
+        # Группируем задачи по менеджерам (оптимизированная версия)
         for task in all_tasks:
-            responsible_id = str(task.get('RESPONSIBLE_ID', task.get('responsibleId', '')))
-            if responsible_id in managers_data:
-                managers_data[responsible_id]['tasks'].append(task)
+            responsible_id = task.get('RESPONSIBLE_ID') or task.get('responsibleId')
+            if responsible_id:
+                user_id_str = user_id_to_str.get(responsible_id)
+                if user_id_str:
+                    managers_data[user_id_str]['tasks'].append(task)
         
-        # Группируем активности CRM по менеджерам
+        # Группируем активности CRM по менеджерам (оптимизированная версия)
         for activity in all_activities:
-            responsible_id = str(activity.get('RESPONSIBLE_ID', ''))
-            if responsible_id in managers_data:
-                managers_data[responsible_id]['activities'].append(activity)
+            responsible_id = activity.get('RESPONSIBLE_ID')
+            if responsible_id:
+                user_id_str = user_id_to_str.get(responsible_id)
+                if user_id_str:
+                    managers_data[user_id_str]['activities'].append(activity)
         
-        # Шаг 3: Формируем активность для каждого менеджера
+        # Шаг 4: Формируем активность для каждого менеджера
         managers_activity = []
         inactive_managers = []
         total_calls = 0
@@ -1646,7 +2025,7 @@ async def get_all_managers_activity(days: int = 30, include_inactive: bool = Tru
                 # Получаем информацию о менеджере
                 manager_name = f"{user.get('NAME', '')} {user.get('LAST_NAME', '')}".strip()
                 
-                # Анализ активностей CRM
+                # Анализ активностей CRM (оптимизированная версия)
                 calls_total = 0
                 calls_incoming = 0
                 calls_outgoing = 0
@@ -1655,10 +2034,10 @@ async def get_all_managers_activity(days: int = 30, include_inactive: bool = Tru
                 emails = 0
                 
                 for activity in activities:
-                    type_id = str(activity.get('TYPE_ID', ''))
+                    type_id = activity.get('TYPE_ID')
                     if type_id == '2':  # Звонки
                         calls_total += 1
-                        direction = str(activity.get('DIRECTION', ''))
+                        direction = activity.get('DIRECTION', '')
                         if direction == '1':
                             calls_outgoing += 1
                         elif direction == '2':
@@ -1670,59 +2049,51 @@ async def get_all_managers_activity(days: int = 30, include_inactive: bool = Tru
                     elif type_id == '4':  # Email
                         emails += 1
                 
-                # Анализ задач
-                tasks_completed = len([t for t in tasks if str(t.get('STATUS', t.get('status', ''))) == '5'])
-                tasks_in_progress = len([t for t in tasks if str(t.get('STATUS', t.get('status', ''))) in ['2', '3']])
+                # Анализ задач (оптимизированная версия)
+                tasks_completed = sum(1 for t in tasks if str(t.get('STATUS', t.get('status', ''))) == '5')
+                tasks_in_progress = sum(1 for t in tasks if str(t.get('STATUS', t.get('status', ''))) in ['2', '3'])
                 
-                # Анализ сделок
-                deals_won = len([d for d in deals if 'WON' in str(d.get('STAGE_ID', '')).upper()])
+                # Анализ сделок (оптимизированная версия)
+                deals_won = sum(1 for d in deals if 'WON' in str(d.get('STAGE_ID', '')).upper())
                 
-                # Анализ лидов
-                leads_converted = len([l for l in leads if str(l.get('STATUS_ID', '')) == 'CONVERTED'])
+                # Анализ лидов (оптимизированная версия)
+                leads_converted = sum(1 for l in leads if str(l.get('STATUS_ID', '')) == 'CONVERTED')
                 
-                # Подсчет общей активности без комментариев и календаря (для быстрой проверки)
-                total_activities_count_basic = (
-                    calls_total + meetings + emails + 
-                    len(tasks) + len(deals) + len(leads)
-                )
-                
-                # Если only_inactive=True и есть базовая активность, пропускаем детальную обработку
-                if only_inactive and total_activities_count_basic > 0:
-                    # Менеджер активен, пропускаем его
-                    continue
-                
-                # Получаем события календаря и комментарии (эти запросы остаются индивидуальными, так как требуют специфичных параметров)
-                calendar_events = await get_calendar_events(
-                    from_date=f"{start_date}T00:00:00",
-                    to_date=f"{end_date}T23:59:59",
-                    owner_id=user_id
-                )
+                # Получаем события календаря и комментарии из предварительно загруженных данных
+                calendar_events = all_calendar_events_by_manager.get(user_id, [])
                 calendar_meetings = len([
                     e for e in calendar_events 
                     if e.get('CAL_TYPE') == 'user' or e.get('MEETING_STATUS') == 'Y'
                 ])
                 
-                # Получаем комментарии
-                date_filter_for_comments = {
-                    '>=DATE_CREATE': f"{start_date}T00:00:00",
-                    '<=DATE_CREATE': f"{end_date}T23:59:59"
-                }
-                deal_comments = await get_all_entity_comments('deal', user_id, from_date=None, date_filter=date_filter_for_comments)
-                lead_comments = await get_all_entity_comments('lead', user_id, from_date=None, date_filter=date_filter_for_comments)
-                contact_comments = await get_all_entity_comments('contact', user_id, from_date=None, date_filter=date_filter_for_comments)
-                company_comments = await get_all_entity_comments('company', user_id, from_date=None, date_filter=date_filter_for_comments)
+                # Получаем комментарии из предварительно загруженных данных
+                manager_comments = all_comments_by_manager.get(user_id, {
+                    'deal': [],
+                    'lead': [],
+                    'contact': [],
+                    'company': []
+                })
+                deal_comments = manager_comments.get('deal', [])
+                lead_comments = manager_comments.get('lead', [])
+                contact_comments = manager_comments.get('contact', [])
+                company_comments = manager_comments.get('company', [])
                 
                 total_comments_count = len(deal_comments) + len(lead_comments) + len(contact_comments) + len(company_comments)
                 
-                # Подсчет общей активности
+                # Подсчет общей активности (включая календарь и комментарии)
                 total_activities_count = (
                     calls_total + meetings + emails + 
                     len(tasks) + len(deals) + len(leads) + 
                     len(calendar_events) + total_comments_count
                 )
                 
+                # Если only_inactive=True и есть активность, пропускаем детальную обработку
+                if only_inactive and total_activities_count > 0:
+                    # Менеджер активен, пропускаем его
+                    continue
+                
                 if total_activities_count == 0:
-                    # Менеджер без активности
+                    # Менеджер без активности - добавляем только базовую информацию
                     inactive_managers.append({
                         'manager_id': user_id,
                         'name': manager_name,
@@ -1730,52 +2101,36 @@ async def get_all_managers_activity(days: int = 30, include_inactive: bool = Tru
                         'work_position': user.get('WORK_POSITION', '')
                     })
                 else:
-                    # Формируем активность менеджера
-                    activity_data = {
-                        'manager_id': user_id,
-                        'name': manager_name,
-                        'email': user.get('EMAIL', ''),
-                        'work_position': user.get('WORK_POSITION', ''),
-                        'period': {
-                            'start_date': start_date,
-                            'end_date': end_date,
-                            'days': days
-                        },
-                        'calls': {
-                            'total': calls_total,
-                            'incoming': calls_incoming,
-                            'outgoing': calls_outgoing,
-                            'missed': calls_missed
-                        },
-                        'meetings': meetings,
-                        'emails': emails,
-                        'tasks': {
-                            'total': len(tasks),
-                            'completed': tasks_completed,
-                            'in_progress': tasks_in_progress
-                        },
-                        'deals': {
-                            'created': len(deals),
-                            'won': deals_won
-                        },
-                        'leads': {
-                            'created': len(leads),
-                            'converted': leads_converted
-                        },
-                        'calendar': {
-                            'total_events': len(calendar_events),
-                            'meetings': calendar_meetings
-                        },
-                        'comments': {
-                            'total': total_comments_count,
-                            'deals': len(deal_comments),
-                            'leads': len(lead_comments),
-                            'contacts': len(contact_comments),
-                            'companies': len(company_comments)
-                        },
-                        'total_activities': total_activities_count
-                    }
-                    
+                    # Менеджер с активностью - создаем полную структуру статистики
+                    activity_data = _create_manager_activity_structure(
+                        user_id=user_id,
+                        user=user,
+                        manager_name=manager_name,
+                        start_date=start_date,
+                        end_date=end_date,
+                        days=days,
+                        calls_total=calls_total,
+                        calls_incoming=calls_incoming,
+                        calls_outgoing=calls_outgoing,
+                        calls_missed=calls_missed,
+                        meetings=meetings,
+                        emails=emails,
+                        tasks=tasks,
+                        tasks_completed=tasks_completed,
+                        tasks_in_progress=tasks_in_progress,
+                        deals=deals,
+                        deals_won=deals_won,
+                        leads=leads,
+                        leads_converted=leads_converted,
+                        calendar_events=calendar_events,
+                        calendar_meetings=calendar_meetings,
+                        deal_comments=deal_comments,
+                        lead_comments=lead_comments,
+                        contact_comments=contact_comments,
+                        company_comments=company_comments,
+                        total_comments_count=total_comments_count,
+                        total_activities_count=total_activities_count
+                    )
                     managers_activity.append(activity_data)
                     
                     # Суммируем статистику
@@ -1789,7 +2144,7 @@ async def get_all_managers_activity(days: int = 30, include_inactive: bool = Tru
                 
             except Exception as e:
                 logger.warning(f"Ошибка при обработке активности менеджера {user_id}: {e}")
-                # Добавляем в список неактивных при ошибке
+                # Добавляем в список неактивных при ошибке с базовой информацией
                 inactive_managers.append({
                     'manager_id': user_id,
                     'name': f"{user.get('NAME', '')} {user.get('LAST_NAME', '')}".strip(),
@@ -1812,7 +2167,7 @@ async def get_all_managers_activity(days: int = 30, include_inactive: bool = Tru
                     'active_managers': len(managers_activity),
                     'inactive_managers': len(inactive_managers)
                 },
-                'inactive_managers': inactive_managers if include_inactive else []
+                'inactive_managers': inactive_managers
             }
             logger.info(f"Возвращен список неактивных менеджеров: {len(inactive_managers)} неактивных из {len(all_users)} всего")
         else:

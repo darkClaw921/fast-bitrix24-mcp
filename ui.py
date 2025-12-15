@@ -877,6 +877,34 @@ async def get_tools():
         )
 
 
+def _normalize_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Нормализация аргументов перед передачей в инструменты
+    
+    Преобразует строки 'null', 'None' в None и удаляет параметры со значением None
+    из словаря аргументов. Это необходимо для корректной обработки опциональных параметров.
+    
+    Args:
+        arguments: Словарь аргументов для инструмента
+    
+    Returns:
+        Нормализованный словарь аргументов без None-значений
+    """
+    normalized = {}
+    for key, value in arguments.items():
+        # Преобразуем строки 'null', 'None' в None
+        if isinstance(value, str):
+            normalized_value = value.strip().lower()
+            if normalized_value in ('null', 'none', ''):
+                # Пропускаем параметры со значением None - не передаем их в метод
+                continue
+        
+        # Если значение не None, добавляем его в нормализованный словарь
+        if value is not None:
+            normalized[key] = value
+    
+    return normalized
+
+
 @app.post("/api/tools/{tool_name}/call", response_class=JSONResponse)
 async def call_tool(tool_name: str, http_request: Request):
     """Вызов конкретного tool с указанными аргументами"""
@@ -891,6 +919,9 @@ async def call_tool(tool_name: str, http_request: Request):
         except Exception as e:
             logger.warning(f"Ошибка парсинга тела запроса: {e}, используем пустые аргументы")
             arguments = {}
+        
+        # Нормализуем аргументы: преобразуем 'null'/'None' в None и удаляем None-параметры
+        arguments = _normalize_arguments(arguments)
         
         logger.info(f"Вызов tool '{tool_name}' с аргументами: {arguments}")
         
