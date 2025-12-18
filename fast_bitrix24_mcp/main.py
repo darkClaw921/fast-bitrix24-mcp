@@ -16,6 +16,7 @@ from .tools.sales_funnel import mcp as sales_funnel_mcp
 from .tools.top_clients import mcp as top_clients_mcp
 from .tools.inactive_clients import mcp as inactive_clients_mcp
 from .tools.manager_support import mcp as manager_support_mcp
+from .tools.overdue_tasks import mcp as overdue_tasks_mcp
 from fastmcp.prompts.prompt import Message, PromptMessage, TextContent
 from datetime import datetime
 import os
@@ -72,6 +73,7 @@ mcp.mount(prefix="sales_funnel", server=sales_funnel_mcp, as_proxy=True)
 mcp.mount(prefix="top_clients", server=top_clients_mcp, as_proxy=True)
 mcp.mount(prefix="inactive_clients", server=inactive_clients_mcp, as_proxy=True)
 mcp.mount(prefix="manager_support", server=manager_support_mcp, as_proxy=True)
+mcp.mount(prefix="overdue_tasks", server=overdue_tasks_mcp, as_proxy=True)
 
 @mcp.prompt(description="главный промт для взаимодействия с сервером который нужно использовать каждый раз при взаимодействии с сервером")
 def main_prompt() -> str:
