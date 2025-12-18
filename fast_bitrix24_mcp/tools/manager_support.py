@@ -12,7 +12,8 @@ from .bitrixWork import (
     get_users_by_filter,
     get_crm_activities_by_filter,
     get_tasks_by_filter,
-    get_deals_by_filter
+    get_deals_by_filter,
+    get_all_deal_stages_by_categories
 )
 
 mcp = FastMCP("manager_support")
@@ -48,19 +49,21 @@ async def _get_all_managers_data_batch(
         production_stage_id: ID стадии "передано в производство" для проверки сделок (опционально)
     
     Returns:
-        Словарь {manager_id: manager_data}, где manager_data имеет структуру:
-        {
-            'manager_id': int,
-            'manager_name': str,
-            'manager_email': str,
-            'overdue_tasks_count': int,
-            'total_activities': int,
-            'calls_count': int,
-            'production_deals_count': int,
-            'tasks': list,  # Все задачи менеджера
-            'activities': list,  # Все активности менеджера
-            'deals': list  # Все сделки менеджера
-        }
+        Словарь с ключами:
+        - 'managers_data': {manager_id: manager_data}, где manager_data имеет структуру:
+          {
+              'manager_id': int,
+              'manager_name': str,
+              'manager_email': str,
+              'overdue_tasks_count': int,
+              'total_activities': int,
+              'calls_count': int,
+              'production_deals_count': int,
+              'tasks': list,  # Все задачи менеджера
+              'activities': list,  # Все активности менеджера
+              'deals': list  # Все сделки менеджера
+          }
+        - 'stage_names': {stage_id: stage_name} - словарь для преобразования ID стадии в название
     """
     now = datetime.now(timezone.utc)
     from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -68,6 +71,35 @@ async def _get_all_managers_data_batch(
     
     # Инициализируем результат
     result = {}
+    
+    # Получаем все стадии сделок для преобразования ID в название
+    stage_names = {}
+    try:
+        logger.info("Получение всех стадий сделок для преобразования ID в название")
+        all_stages = await get_all_deal_stages_by_categories("DEAL_STAGE")
+        for stage in all_stages:
+            status_id = stage.get('STATUS_ID') or stage.get('ID')
+            name = stage.get('NAME', '')
+            if status_id:
+                # Сохраняем как строку для надежного поиска
+                status_id_str = str(status_id).strip()
+                if status_id_str:
+                    stage_names[status_id_str] = name
+                    # Также сохраняем в верхнем регистре для поиска без учета регистра
+                    if status_id_str.upper() != status_id_str:
+                        stage_names[status_id_str.upper()] = name
+        logger.info(f"Получено {len([k for k in stage_names.keys() if not k.isupper()])} уникальных стадий для преобразования")
+        if production_stage_id:
+            production_stage_id_clean = str(production_stage_id).strip('"\'')
+            logger.info(f"Ищем название для стадии: {production_stage_id_clean}")
+            found_name = stage_names.get(production_stage_id_clean) or stage_names.get(production_stage_id_clean.upper())
+            if found_name:
+                logger.info(f"Найдено название стадии: {found_name}")
+            else:
+                available_stages = [k for k in stage_names.keys() if not k.isupper()][:10]
+                logger.warning(f"Не найдено название для стадии {production_stage_id_clean}. Примеры доступных стадий: {available_stages}")
+    except Exception as e:
+        logger.warning(f"Ошибка при получении стадий для преобразования: {e}")
     
     try:
         # Шаг 1: Получаем всех активных менеджеров
@@ -114,7 +146,7 @@ async def _get_all_managers_data_batch(
         
         if not manager_ids:
             logger.warning("Не найдено активных менеджеров")
-            return result
+            return {'managers_data': result, 'stage_names': stage_names}
         
         logger.info(f"Найдено {len(manager_ids)} активных менеджеров")
         
@@ -249,7 +281,7 @@ async def _get_all_managers_data_batch(
     except Exception as e:
         logger.error(f"Ошибка при получении данных менеджеров батчами: {e}")
     
-    return result
+    return {'managers_data': result, 'stage_names': stage_names}
 
 
 @mcp.tool()
@@ -311,10 +343,45 @@ async def get_managers_needing_support(
     try:
         # Получаем данные всех менеджеров батчами
         logger.info(f"Получение данных всех менеджеров за {days} дней батчами")
-        all_managers_data = await _get_all_managers_data_batch(
+        managers_result = await _get_all_managers_data_batch(
             days=days,
             production_stage_id=production_stage_id
         )
+        
+        all_managers_data = managers_result.get('managers_data', {})
+        stage_names = managers_result.get('stage_names', {})
+        
+        # Получаем название стадии производства, если указана
+        production_stage_name = None
+        production_stage_id_clean = None
+        if production_stage_id:
+            # Убираем кавычки, если они есть
+            production_stage_id_clean = str(production_stage_id).strip('"\'')
+            production_stage_id_str = str(production_stage_id_clean)
+            
+            # Пробуем найти название стадии
+            production_stage_name = stage_names.get(production_stage_id_str)
+            
+            # Если не нашли, пробуем в верхнем регистре
+            if not production_stage_name:
+                production_stage_name = stage_names.get(production_stage_id_str.upper())
+            
+            # Если все еще не нашли, пробуем поиск по частичному совпадению
+            if not production_stage_name:
+                for stage_id, stage_name in stage_names.items():
+                    # Убираем дубликаты в верхнем регистре
+                    if stage_id.isupper():
+                        continue
+                    if stage_id.upper() == production_stage_id_str.upper() or stage_id == production_stage_id_str:
+                        production_stage_name = stage_name
+                        break
+            
+            # Если все еще не нашли, используем очищенный ID (без кавычек)
+            if not production_stage_name:
+                logger.warning(f"Не найдено название для стадии {production_stage_id_clean}. Доступные стадии (первые 10): {list(set([k for k in stage_names.keys() if not k.isupper()]))[:10]}")
+                production_stage_name = production_stage_id_str
+        else:
+            production_stage_id_clean = None
         
         if not all_managers_data:
             if isText:
@@ -354,7 +421,8 @@ async def get_managers_needing_support(
             
             # Проверка 4: Нет сделок в производстве (если стадия указана)
             if production_stage_id and manager_data['production_deals_count'] == 0:
-                reasons.append(f"Нет сделок в производстве (стадия {production_stage_id})")
+                stage_display = production_stage_name if production_stage_name else (production_stage_id_clean if production_stage_id_clean else production_stage_id)
+                reasons.append(f"Нет сделок в стадии {stage_display}")
             
             # Если есть хотя бы одна причина, добавляем менеджера в список
             if reasons:
@@ -386,7 +454,8 @@ async def get_managers_needing_support(
             result_text += f"  • Низкая активность: < {low_activity_threshold}\n"
             result_text += f"  • Мало звонков: < {low_calls_threshold}\n"
             if production_stage_id:
-                result_text += f"  • Стадия производства: {production_stage_id}\n"
+                stage_display = production_stage_name if production_stage_name else (production_stage_id_clean if production_stage_id_clean else production_stage_id)
+                result_text += f"  • Стадия: {stage_display}\n"
             result_text += "\n"
             
             for idx, manager_info in enumerate(managers_needing_support, 1):
@@ -404,7 +473,8 @@ async def get_managers_needing_support(
                 result_text += f"     • Всего активностей: {metrics['total_activities']}\n"
                 result_text += f"     • Звонков: {metrics['calls_count']}\n"
                 if production_stage_id:
-                    result_text += f"     • Сделок в производстве: {metrics['production_deals_count']}\n"
+                    stage_display = production_stage_name if production_stage_name else (production_stage_id_clean if production_stage_id_clean else production_stage_id)
+                    result_text += f"     • Сделок в стадии {stage_display}: {metrics['production_deals_count']}\n"
                 
                 result_text += "\n"
             
