@@ -35,8 +35,8 @@ def _parse_datetime_from_bitrix(dt_str: str) -> datetime:
 
 
 @mcp.tool()
-async def get_managers_with_declined_activity(isText: bool = False) -> dict | str:
-    """Выявление менеджеров со сниженной активностью (оптимизированная версия с батчами)
+async def get_managers_with_declined_activity(isText: bool = True) -> dict | str:
+    """Выявление менеджеров со сниженной активностью 
     
     Менеджер считается снизившим активность, если за последние 7 дней у него:
     - количество задач упало на 30%+ по сравнению с предыдущей неделей
@@ -46,7 +46,7 @@ async def get_managers_with_declined_activity(isText: bool = False) -> dict | st
     Это значительно ускоряет работу при большом количестве менеджеров.
     
     Args:
-        isText: Если True, возвращает человекочитаемый текст с информацией о менеджерах. Если False, возвращает структурированный словарь (по умолчанию False)
+        isText: Если True (по умолчанию), возвращает человекочитаемый текст с информацией о менеджерах; если False, возвращает структурированный словарь
     
     Returns:
         Если isText=False: dict с информацией о менеджерах со сниженной активностью:

@@ -568,8 +568,8 @@ async def _get_client_activity_batch(
 async def get_clients_without_activity(
     category_filter: dict[str, str] = None,
     days: int = 30,
-    isText: bool = False,
-    include_comments: bool = True,
+    isText: bool = True,
+    include_comments: bool = False,
     include_contacts: bool = True,
     include_companies: bool = True
 ) -> dict | str:

@@ -55,7 +55,7 @@ def _format_timedelta(delta: timedelta) -> str:
 @mcp.tool()
 async def get_managers_with_overdue_tasks(
     filter_fields: dict[str, str] = None, 
-    exclude_manager_ids: list[int] = None,
+    exclude_manager_ids: list[int] = [61],
     include_manager_ids: list[int] = None,
     isText: bool = True
 ) -> str | dict:

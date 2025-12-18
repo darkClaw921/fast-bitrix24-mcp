@@ -258,8 +258,8 @@ async def get_managers_needing_support(
     overdue_tasks_threshold: int = 5,
     low_activity_threshold: int = 10,
     low_calls_threshold: int = 5,
-    production_stage_id: str = None,
-    isText: bool = False
+    production_stage_id: str = 'C3:WON',
+    isText: bool = True
 ) -> dict | str:
     """Получение менеджеров, которым нужна помощь или поддержка
     
@@ -275,7 +275,7 @@ async def get_managers_needing_support(
         low_activity_threshold: Порог низкой активности (по умолчанию 10 активностей)
         low_calls_threshold: Порог низкого количества звонков (по умолчанию 5 звонков)
         production_stage_id: ID стадии "передано в производство" для проверки сделок (опционально)
-        isText: Если True, возвращает человекочитаемый текст; если False (по умолчанию), возвращает структурированный словарь
+        isText: Если True (по умолчанию), возвращает человекочитаемый текст; если False, возвращает структурированный словарь
     
     Returns:
         Если isText=False — словарь с данными менеджеров, нуждающихся в поддержке:

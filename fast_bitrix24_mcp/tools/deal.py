@@ -928,7 +928,7 @@ async def _get_all_deals_activity_batch(deal_ids: list[int | str], days: int = 3
 
 
 @mcp.tool()
-async def get_deals_at_risk(filter_fields: dict[str, str] = None, fields_id: list[str] = None, include_comments: bool = True, exclude_funnel_keyword: str = None) -> str:
+async def get_deals_at_risk(filter_fields: dict[str, str] = None, fields_id: list[str] = None, include_comments: bool = False, exclude_funnel_keyword: str = "архив") -> str:
     """Получение сделок, находящихся в риске
     
     Сделка считается «в риске», если выполняется одно или несколько условий:

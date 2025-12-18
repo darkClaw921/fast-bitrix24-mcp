@@ -64,7 +64,7 @@ def _parse_datetime_from_bitrix(dt_str: str) -> datetime:
 
 
 @mcp.tool()
-async def get_daily_summary(date: str = None, group_by_managers: bool = False, isText: bool = False) -> dict | str:
+async def get_daily_summary(date: str = None, group_by_managers: bool = False, isText: bool = True) -> dict | str:
     """Получение сводки по итогам дня (оптимизированная версия с батчами)
     
     Сводка включает:
@@ -78,7 +78,7 @@ async def get_daily_summary(date: str = None, group_by_managers: bool = False, i
     Args:
         date: Дата для сводки в формате YYYY-MM-DD. Если не указана, используется сегодняшний день (московское время)
         group_by_managers: Если True, возвращает сводку с группировкой по менеджерам. Если False, возвращает общую сводку (по умолчанию False)
-        isText: Если True, возвращает человекочитаемый текст. Если False, возвращает структурированный словарь (по умолчанию False)
+        isText: Если True (по умолчанию), возвращает человекочитаемый текст; если False, возвращает структурированный словарь
     
     Returns:
         Если group_by_managers=False и isText=False: dict с общей сводкой:

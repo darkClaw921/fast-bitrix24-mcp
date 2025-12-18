@@ -63,7 +63,7 @@ def _parse_datetime_from_bitrix(dt_str: str) -> datetime:
 
 
 @mcp.tool()
-async def get_sales_funnel(from_date: str = None, to_date: str = None, isText: bool = False) -> dict | str:
+async def get_sales_funnel(from_date: str = None, to_date: str = None, isText: bool = True) -> dict | str:
     """Построение воронки продаж за период (оптимизированная версия с батчами)
     
     Воронка показывает:
@@ -79,7 +79,7 @@ async def get_sales_funnel(from_date: str = None, to_date: str = None, isText: b
     Args:
         from_date: Начало периода в формате YYYY-MM-DD. Если не указана, используется начало текущего месяца (московское время)
         to_date: Конец периода в формате YYYY-MM-DD. Если не указана, используется конец текущего месяца (московское время)
-        isText: Если True, возвращает человекочитаемый текст. Если False, возвращает структурированный словарь (по умолчанию False)
+        isText: Если True (по умолчанию), возвращает человекочитаемый текст; если False, возвращает структурированный словарь
     
     Returns:
         Если isText=False: dict с данными воронки:
