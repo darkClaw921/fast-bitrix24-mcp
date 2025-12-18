@@ -41,7 +41,7 @@ async def _get_client_activity_batch(
     company_ids: list[int] = None,
     days: int = 30,
     include_comments: bool = True,
-    include_contacts: bool = True,
+    include_contacts: bool = False,
     include_companies: bool = True
 ) -> dict:
     """Получение активности для всех клиентов батчами (оптимизированная версия)
@@ -51,7 +51,7 @@ async def _get_client_activity_batch(
         company_ids: Список ID компаний
         days: Количество дней для проверки активности (по умолчанию 30)
         include_comments: Получать комментарии для всех клиентов (по умолчанию True)
-        include_contacts: Включить контакты в проверку (по умолчанию True)
+        include_contacts: Включить контакты в проверку (по умолчанию False)
         include_companies: Включить компании в проверку (по умолчанию True)
     
     Returns:
@@ -566,11 +566,11 @@ async def _get_client_activity_batch(
 
 @mcp.tool()
 async def get_clients_without_activity(
-    category_filter: dict[str, str] = None,
+    category_filter: dict[str, str] = {"UF_CRM_1659553251682": "775"},
     days: int = 30,
     isText: bool = True,
     include_comments: bool = False,
-    include_contacts: bool = True,
+    include_contacts: bool = False,
     include_companies: bool = True
 ) -> dict | str:
     """Получение клиентов категории A без активности за указанный период
