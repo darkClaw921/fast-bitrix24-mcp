@@ -148,19 +148,17 @@ async def get_sales_funnel(from_date: str = None, to_date: str = None, isText: b
                 to_dt = now_moscow.replace(month=now_moscow.month + 1, day=1) - timedelta(microseconds=1)
             to_dt = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
         
-        # Конвертируем в UTC для запросов к API
-        from_dt_utc = from_dt.astimezone(timezone.utc)
-        to_dt_utc = to_dt.astimezone(timezone.utc)
-        
-        from_date_iso = from_dt_utc.strftime("%Y-%m-%dT%H:%M:%S")
-        to_date_iso = to_dt_utc.strftime("%Y-%m-%dT%H:%M:%S")
+        # Форматируем для фильтров API (используем московское время напрямую,
+        # так как Bitrix24 интерпретирует даты без timezone как московское время)
+        from_date_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        to_date_iso = to_dt.strftime("%Y-%m-%dT%H:%M:%S")
         
         from_date_str = from_dt.strftime("%Y-%m-%d")
         to_date_str = to_dt.strftime("%Y-%m-%d")
         
         logger.info(
             f"Построение воронки продаж за период {from_date_str} - {to_date_str} "
-            f"(UTC: {from_date_iso} - {to_date_iso})"
+            f"(MSK: {from_date_iso} - {to_date_iso})"
         )
         
         # Оптимизация: получаем все данные параллельно одним набором запросов
@@ -201,8 +199,14 @@ async def get_sales_funnel(from_date: str = None, to_date: str = None, isText: b
             date_create_str = lead.get('DATE_CREATE')
             if date_create_str:
                 date_create = _parse_datetime_from_bitrix(date_create_str)
-                if date_create and from_dt_utc <= date_create <= to_dt_utc:
-                    filtered_leads.append(lead)
+                # Конвертируем дату из Bitrix24 в московское время для сравнения
+                if date_create:
+                    if date_create.tzinfo:
+                        date_create_msk = date_create.astimezone(moscow_tz)
+                    else:
+                        date_create_msk = moscow_tz.localize(date_create)
+                    if from_dt <= date_create_msk <= to_dt:
+                        filtered_leads.append(lead)
         all_leads = filtered_leads
         
         logger.info(f"Получено лидов: {len(all_leads)} (после фильтрации по дате создания)")
@@ -221,8 +225,14 @@ async def get_sales_funnel(from_date: str = None, to_date: str = None, isText: b
             date_create_str = deal.get('DATE_CREATE')
             if date_create_str:
                 date_create = _parse_datetime_from_bitrix(date_create_str)
-                if date_create and from_dt_utc <= date_create <= to_dt_utc:
-                    filtered_deals.append(deal)
+                # Конвертируем дату из Bitrix24 в московское время для сравнения
+                if date_create:
+                    if date_create.tzinfo:
+                        date_create_msk = date_create.astimezone(moscow_tz)
+                    else:
+                        date_create_msk = moscow_tz.localize(date_create)
+                    if from_dt <= date_create_msk <= to_dt:
+                        filtered_deals.append(deal)
         all_deals = filtered_deals
         
         logger.info(f"Получено сделок: {len(all_deals)} (после фильтрации по дате создания)")
@@ -270,6 +280,38 @@ async def get_sales_funnel(from_date: str = None, to_date: str = None, isText: b
                     pass
         
         logger.info(f"Отфильтровано записей истории для сделок периода: {len(filtered_history)}")
+        
+        # Дедупликация: если одна сделка несколько раз попадала в одну и ту же стадию,
+        # оставляем только запись с максимальным ID (самую последнюю)
+        unique_history = {}
+        for history_item in filtered_history:
+            owner_id = history_item.get('OWNER_ID')
+            stage_id = history_item.get('STAGE_ID')
+            category_id = str(history_item.get('CATEGORY_ID', '0'))
+            
+            if not owner_id or not stage_id:
+                continue
+            
+            # Ключ для группировки: (owner_id, stage_id, category_id)
+            key = (int(owner_id), stage_id, category_id)
+            history_id = history_item.get('ID')
+            
+            if key not in unique_history:
+                unique_history[key] = history_item
+            else:
+                # Если уже есть запись, сравниваем ID и оставляем с большим ID
+                existing_id = unique_history[key].get('ID')
+                try:
+                    if history_id and existing_id:
+                        if int(history_id) > int(existing_id):
+                            unique_history[key] = history_item
+                except (ValueError, TypeError):
+                    # Если не удалось сравнить ID, оставляем существующую запись
+                    pass
+        
+        # Преобразуем словарь обратно в список уникальных записей
+        filtered_history = list(unique_history.values())
+        logger.info(f"После дедупликации уникальных записей истории: {len(filtered_history)}")
         
         # Создаем словарь стадий для быстрого поиска (как в get_deals_at_risk)
         stages_dict = {}

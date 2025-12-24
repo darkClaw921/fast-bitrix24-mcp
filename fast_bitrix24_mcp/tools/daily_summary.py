@@ -135,18 +135,15 @@ async def get_daily_summary(date: str = None, group_by_managers: bool = False, i
         day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
         day_end = target_date.replace(hour=23, minute=59, second=59, microsecond=999999)
         
-        # Конвертируем в UTC для запросов к API
-        day_start_utc = day_start.astimezone(pytz.UTC)
-        day_end_utc = day_end.astimezone(pytz.UTC)
-        
-        # Форматируем для фильтров API
-        day_start_str = day_start_utc.strftime("%Y-%m-%dT%H:%M:%S")
-        day_end_str = day_end_utc.strftime("%Y-%m-%dT%H:%M:%S")
+        # Форматируем для фильтров API (используем московское время напрямую,
+        # так как Bitrix24 интерпретирует даты без timezone как московское время)
+        day_start_str = day_start.strftime("%Y-%m-%dT%H:%M:%S")
+        day_end_str = day_end.strftime("%Y-%m-%dT%H:%M:%S")
         date_str = target_date.strftime("%Y-%m-%d")
         
         logger.info(
             f"Получение сводки за день: {date_str} "
-            f"(период: {day_start_str} - {day_end_str} UTC)"
+            f"(период: {day_start_str} - {day_end_str} MSK)"
         )
         
         # Получаем все данные параллельно одним набором запросов

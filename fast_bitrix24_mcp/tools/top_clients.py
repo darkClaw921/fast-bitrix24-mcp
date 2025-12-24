@@ -128,8 +128,9 @@ async def get_top_clients_by_deals_sum(
             try:
                 from_dt = datetime.strptime(from_date, "%Y-%m-%d")
                 from_dt = moscow_tz.localize(from_dt).replace(hour=0, minute=0, second=0, microsecond=0)
-                from_dt_utc = from_dt.astimezone(timezone.utc)
-                from_date_iso = from_dt_utc.strftime("%Y-%m-%dT%H:%M:%S")
+                # Используем московское время напрямую для фильтров API
+                # (Bitrix24 интерпретирует даты без timezone как московское время)
+                from_date_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%S")
                 from_date_str = from_dt.strftime("%Y-%m-%d")
             except ValueError:
                 raise ValueError(f"Неверный формат from_date: {from_date}. Используйте формат YYYY-MM-DD")
@@ -139,8 +140,9 @@ async def get_top_clients_by_deals_sum(
             try:
                 to_dt = datetime.strptime(to_date, "%Y-%m-%d")
                 to_dt = moscow_tz.localize(to_dt).replace(hour=23, minute=59, second=59, microsecond=999999)
-                to_dt_utc = to_dt.astimezone(timezone.utc)
-                to_date_iso = to_dt_utc.strftime("%Y-%m-%dT%H:%M:%S")
+                # Используем московское время напрямую для фильтров API
+                # (Bitrix24 интерпретирует даты без timezone как московское время)
+                to_date_iso = to_dt.strftime("%Y-%m-%dT%H:%M:%S")
                 to_date_str = to_dt.strftime("%Y-%m-%d")
             except ValueError:
                 raise ValueError(f"Неверный формат to_date: {to_date}. Используйте формат YYYY-MM-DD")
